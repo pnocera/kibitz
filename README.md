@@ -18,11 +18,11 @@ turn ends ────► hook ─────────────┴─► 
 ## Install
 
 ```bash
-npx skills add pnocera/advisor
+npx skills add pnocera/kibitz
 ```
 
-The repo is `advisor`; the skill it installs is called **kibitz**, because Claude Code already has a
-built-in `/advisor` command and shadowing it is a bad idea.
+Named kibitz because Claude Code already has a built-in `/advisor`, and shadowing it is a bad idea.
+(A kibitzer is someone who watches over your shoulder and offers unsolicited advice.)
 
 That installs to `.agents/skills/kibitz/` and symlinks it for Claude Code. It does **not** put a
 `kibitz` command on your PATH, so either use the full path or make a shim:
