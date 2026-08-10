@@ -18,35 +18,48 @@ turn ends ────► hook ─────────────┴─► 
 ## Install
 
 ```bash
-npx skills add pnocera/kibitz
+npx skills add -g -a claude-code pnocera/kibitz
+```
+
+Restart Claude Code, then ask it to opt in for the current directory:
+
+> run `kibitz on`
+
+That is the whole installation. kibitz ships as a Claude Code **plugin**, so the hooks come with it:
+nothing to merge into `settings.json`.
+
+Note that `kibitz` is on **Claude Code's Bash tool** `PATH`, not your shell's — that is what plugins
+expose. Asking Claude to run it works; typing it in your own terminal will not, unless you use the
+full path or run `kibitz link`:
+
+```bash
+~/.claude/skills/kibitz/bin/kibitz on     # or: ... link, for a ~/.local/bin shim
 ```
 
 Named kibitz because Claude Code already has a built-in `/advisor`, and shadowing it is a bad idea.
 (A kibitzer is someone who watches over your shoulder and offers unsolicited advice.)
 
-That installs to `.agents/skills/kibitz/` and symlinks it for Claude Code. It does **not** put a
-`kibitz` command on your PATH, so either use the full path or make a shim:
+**Why those two flags.** `-a claude-code` matters: without it the installer symlinks the skill into
+every agent directory it knows about — around fifty of them — and kibitz is useless to all of them,
+since its hooks are Claude Code's mechanism. `-g` installs to `~/.claude/skills/kibitz`, which loads
+in every project. A project-scope install instead lands in `.claude/skills/kibitz`, which loads only
+after you accept the workspace trust dialog and only when Claude Code starts from that exact
+directory.
 
-```bash
-K=./.agents/skills/kibitz/bin/kibitz
-$K link              # optional: puts `kibitz` in ~/.local/bin
-$K doctor            # check dependencies
-$K install           # merge hooks into .claude/settings.json (existing hooks preserved)
-$K on                # opt in for this directory
-```
-
-To update later: `npx skills update` (`-p` for project scope, `-g` for global).
-
-**Restart Claude Code after `install`** — hooks are snapshotted at session start, so changes to
-`settings.json` do not take effect in a running session.
+To update: `npx skills update -g`.
 
 Requires `codex` (tested on codex-cli 0.147.0), `jq`, and coreutils.
 
-`kibitz install user` writes to `~/.claude/settings.json` instead of the project — but it bakes
-this checkout's absolute path into your global config, so it refuses to run from a project-local or
-temporary location. For a user-scope install, clone the repo somewhere stable and run it from there.
-Both scopes back the file up first and write via atomic rename; `kibitz uninstall [project|user]`
-removes only kibitz's own hooks.
+<details>
+<summary>Registering hooks by hand instead</summary>
+
+For a checkout that does not live in a skills directory, `kibitz install` merges hooks into
+`settings.json`, preserving anything already there, and `kibitz uninstall` removes only its own.
+`kibitz install user` targets `~/.claude/settings.json` but refuses to run from a project-local or
+temporary checkout, since it bakes an absolute path into your global config. `kibitz link` puts the
+command on your `PATH`. None of this is needed for a plugin install.
+
+</details>
 
 ## Use
 
@@ -135,11 +148,13 @@ shell.
 bash tests/run-tests.sh
 ```
 
-82 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+104 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
-reading, invocation confinement, install/uninstall merge safety, epoch boundaries across off/on, mute at both
-publication and delivery, and hot-path latency.
+reading, invocation confinement, the plugin package (manifest, hook events, relocatable
+`${CLAUDE_PLUGIN_ROOT}` paths), install/uninstall merge safety including hooks nested beside yours,
+upgrade from the two-file state layout, epoch boundaries across off/on, mute at both publication and
+delivery, and hot-path latency.
 
 The concurrency and confinement tests were each verified to **fail** against the pre-fix code. A
 test that passes either way is worth nothing — if you change the locking, the fingerprint, the

@@ -10,8 +10,9 @@ turn endings, reads the working tree, and offers whatever it thinks is worth say
 are injected into the conversation at the next tool call, and always written to a durable log the
 operator can watch.
 
-`npx skills add` does not put `kibitz` on the PATH. Use the installed script directly
-(`./.agents/skills/kibitz/bin/kibitz`) or run `kibitz link` once for a shim in `~/.local/bin`.
+Installed as a plugin (`npx skills add -g -a claude-code pnocera/kibitz`), the hooks are already
+active and `kibitz` is on the Bash PATH — nothing to register. For a checkout outside a skills
+directory, `kibitz install` merges hooks into `settings.json` instead.
 
 The command is `kibitz`, not `advisor`: Claude Code has its own built-in `/advisor`.
 
@@ -31,9 +32,8 @@ The command is `kibitz`, not `advisor`: Claude Code has its own built-in `/advis
 
 Default is **off**. Opt-in per project directory, so `on` here does not enable it elsewhere.
 
-First-time setup in a new project: `kibitz install` (merges hooks into `.claude/settings.json`,
-preserving anything already there), then restart Claude Code — hooks are snapshotted at session
-start. `kibitz uninstall` removes them.
+New project: just `kibitz on`. A plugin install needs no per-project hook registration; hook changes
+themselves need a restart or `/reload-plugins`, since they are snapshotted at session start.
 
 ## What to do with an advisory
 

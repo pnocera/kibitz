@@ -1,0 +1,9 @@
+{
+  "name": "kibitz",
+  "description": "Codex as a background advisory process for Claude Code. An independent observer that comments on work in progress. Advisory, not review.",
+  "version": "0.2.0",
+  "author": { "name": "Pierre Nocera" },
+  "homepage": "https://github.com/pnocera/kibitz",
+  "repository": "https://github.com/pnocera/kibitz",
+  "license": "MIT"
+}

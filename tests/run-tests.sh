@@ -13,10 +13,11 @@ trap 'rm -rf "$ADVISOR_STATE_ROOT" "$WORK"' EXIT
 pass=0; fail=0
 ok()   { printf '  \033[32mok\033[0m   %s\n' "$1"; pass=$((pass+1)); }
 no()   { printf '  \033[31mFAIL\033[0m %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; fail=$((fail+1)); }
-# `cmd | grep -q` under `set -o pipefail` reports failure even on a match:
-# grep exits early, the producer takes SIGPIPE, and pipefail surfaces that.
-# Assertions run with pipefail off so they test what they say they test.
-check(){ if ( set +o pipefail; eval "$2" ); then ok "$1"; else no "$1" "${3:-}"; fi; }
+# Assertions keep pipefail, so a broken producer cannot be masked by a
+# succeeding consumer. Use `grep PATTERN >/dev/null` rather than `grep -q` in a
+# pipeline: -q exits on first match, the producer takes SIGPIPE, and pipefail
+# then reports failure even though the assertion held.
+check(){ if eval "$2"; then ok "$1"; else no "$1" "${3:-}"; fi; }
 
 SID="test-session"
 hookjson() { jq -cn --arg c "$WORK" --arg s "$SID" '{cwd:$c, session_id:$s, transcript_path:""}'; }
@@ -84,10 +85,10 @@ check "drain: pending advisory is emitted as additionalContext" \
   '[ -n "$out" ] && printf "%s" "$out" | jq -e ".hookSpecificOutput.additionalContext" >/dev/null'
 
 check "drain: emitted block carries the untrusted-provenance banner" \
-  'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep -q "UNTRUSTED ADVISORY"'
+  'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep >/dev/null "UNTRUSTED ADVISORY"'
 
 check "drain: emitted block carries the sentinel for self-filtering" \
-  'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep -q "⟦kibitz⟧"'
+  'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep >/dev/null "⟦kibitz⟧"'
 
 check "drain: hookEventName matches the firing event" \
   '[ "$(printf "%s" "$out" | jq -r ".hookSpecificOutput.hookEventName")" = "PreToolUse" ]'
@@ -145,7 +146,7 @@ check "a mutating tool records one event" '[ "$(evcount)" -eq 1 ]'
 toolhook PostToolUse Write >/dev/null
 check "events accumulate, one record per file" '[ "$(evcount)" -eq 2 ]'
 check "the event captures the tool name" \
-  'find "$(sdir)/events" -name "*.json" | xargs -r cat | grep -q "\"Edit\""'
+  'find "$(sdir)/events" -name "*.json" | xargs -r cat | grep >/dev/null "\"Edit\""'
 
 # Concurrent producers: several PostToolUse hooks can run at once, so a shared
 # append-only file would interleave. One file per record must survive it.
@@ -366,9 +367,9 @@ plant_stale id-stale "written before the operator opted out"
 plant id-fresh "written after"
 out="$(fire PreToolUse)"
 check "a record from an older epoch is never delivered" \
-  '! printf "%s" "$out" | grep -q "before the operator opted out"'
+  '! printf "%s" "$out" | grep >/dev/null "before the operator opted out"'
 check "a current record in the same drain is still delivered" \
-  'printf "%s" "$out" | grep -q "written after"'
+  'printf "%s" "$out" | grep >/dev/null "written after"'
 check "the stale record is not left lying around" \
   '[ -z "$(find "$(sdir)/outbox" -name "0-id-stale.json" 2>/dev/null)" ]'
 
@@ -467,6 +468,63 @@ check "an event written by an in-flight tap hook after off is never used" \
   '! grep -q "Edit" "$PROMPTCAP"' "pre-off activity reached the next cycle"
 
 echo
+echo "the plugin package"
+
+PLUG="$HERE/../skills/kibitz"
+check "ships a plugin manifest" '[ -f "$PLUG/.claude-plugin/plugin.json" ]'
+check "the manifest is valid JSON with a name" \
+  '[ "$(jq -r .name "$PLUG/.claude-plugin/plugin.json")" = "kibitz" ]'
+check "ships plugin hooks at the path Claude Code reads" '[ -f "$PLUG/hooks/hooks.json" ]'
+check "plugin hooks cover every event the tap needs" \
+  'for e in PreToolUse UserPromptSubmit PostToolUse PostToolUseFailure Stop SubagentStop SessionEnd; do
+     jq -e --arg e "$e" ".hooks[\$e]" "$PLUG/hooks/hooks.json" >/dev/null || exit 1; done'
+# The whole point of the plugin route: no absolute path baked in anywhere.
+# Count outside the assertion -- check's eval would expand ${CLAUDE_PLUGIN_ROOT}
+# itself, and under `set -u` that aborts the test rather than failing it.
+HOOKTOTAL=$(jq -r '[.hooks[][].hooks[].command] | length' "$PLUG/hooks/hooks.json")
+# startswith, not contains: `echo CLAUDE_PLUGIN_ROOT; /baked/path/kibitz ...`
+# would satisfy a substring check while reintroducing an absolute path.
+HOOKPREFIX='"${CLAUDE_PLUGIN_ROOT}"/bin/kibitz hook '
+HOOKROOTED=$(jq -r --arg p "$HOOKPREFIX" '[.hooks[][].hooks[].command]
+                    | map(select(startswith($p))) | length' "$PLUG/hooks/hooks.json")
+check "every plugin hook resolves through CLAUDE_PLUGIN_ROOT" \
+  '[ "$HOOKROOTED" -eq "$HOOKTOTAL" ] && [ "$HOOKTOTAL" -eq 7 ]' \
+  "$HOOKROOTED of $HOOKTOTAL"
+# Seven rooted commands is not enough: a swapped suffix (Stop invoking
+# `hook PreToolUse`) satisfies every check above and silently misroutes the
+# lifecycle. Pin each event to its own handler, in both maintained configs.
+mismatch=$(jq -r '[.hooks | to_entries[] | .key as $e | .value[].hooks[]
+                   | select((.command | endswith(" hook " + $e)) | not)
+                   | "\($e): \(.command)"] | .[]' "$PLUG/hooks/hooks.json")
+check "each plugin hook invokes the handler for its own event" \
+  '[ -z "$mismatch" ]' "$mismatch"
+tmismatch=$(jq -r '[.hooks | to_entries[] | .key as $e | .value[].hooks[]
+                    | select((.command | endswith(" hook " + $e)) | not)
+                    | "\($e): \(.command)"] | .[]' "$PLUG/install/hooks.json")
+check "each settings.json template hook does too" \
+  '[ -z "$tmismatch" ]' "$tmismatch"
+check "both configs cover the same events" \
+  '[ "$(jq -S -r ".hooks|keys|join(\",\")" "$PLUG/hooks/hooks.json")" = \
+     "$(jq -S -r ".hooks|keys|join(\",\")" "$PLUG/install/hooks.json")" ]' \
+  "plugin: $(jq -r '.hooks|keys|join(",")' "$PLUG/hooks/hooks.json") / template: $(jq -r '.hooks|keys|join(",")' "$PLUG/install/hooks.json")"
+
+check "no absolute path leaks into the plugin hooks" \
+  '! grep -q "/home/" "$PLUG/hooks/hooks.json"'
+check "the executable the hooks name is present and runnable" '[ -x "$PLUG/bin/kibitz" ]'
+check "the legacy settings.json template is out of the plugin hook path" \
+  '[ -f "$PLUG/install/hooks.json" ] && [ ! -f "$PLUG/hooks.json" ]'
+
+# A user hook that merely mentions our command must not be treated as ours.
+MIXDIR="$WORK/anchor"; mkdir -p "$MIXDIR/.claude"
+cat >"$MIXDIR/.claude/settings.json" <<ANCHOR
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"logger '/bin/kibitz hook Stop'"}]}]}}
+ANCHOR
+( cd "$MIXDIR" && "$PLUG/bin/kibitz" uninstall project ) >/dev/null 2>&1
+check "a user command that merely mentions ours is not deleted" \
+  'grep "logger" "$MIXDIR/.claude/settings.json" >/dev/null' \
+  "$(cat "$MIXDIR/.claude/settings.json")"
+
+echo
 echo "install through a symlink  (found by the advisor, on itself)"
 
 # ADVISOR_HOME must come from the *resolved* script path. Invoked via a symlink
@@ -485,7 +543,7 @@ check "install works through a symlink with no ADVISOR_HOME override" \
 check "install registers the tap events too" \
   'jq -e ".hooks.PostToolUse and .hooks.PostToolUseFailure and .hooks.Stop" "$INSTDIR/.claude/settings.json" >/dev/null'
 check "installed commands point at the real script, not the symlink dir" \
-  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "skills/kibitz/bin/kibitz"'
+  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep >/dev/null "skills/kibitz/bin/kibitz"'
 
 # Existing hooks must survive, and uninstall must put things back.
 # Uninstall on a project that never installed anything is a no-op, not an error,
@@ -503,7 +561,7 @@ printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]}
   >"$INSTDIR/.claude/settings.json"
 ( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
 check "install preserves a pre-existing hook on the same event" \
-  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "echo mine"'
+  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep >/dev/null "echo mine"'
 check "install preserves unrelated settings" \
   '[ "$(jq -r ".model" "$INSTDIR/.claude/settings.json")" = "x" ]'
 # Upgrading from the pre-rename binary must clean up, not duplicate. A matcher
@@ -517,7 +575,7 @@ check "install replaces a hook left by the former binary name" \
   '[ "$(jq -r "[.hooks.Stop[].hooks[].command] | length" "$INSTDIR/.claude/settings.json")" = "1" ]' \
   "$(jq -r '[.hooks.Stop[].hooks[].command] | .[]' "$INSTDIR/.claude/settings.json" 2>/dev/null)"
 check "the surviving hook is the current one" \
-  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "bin/kibitz"'
+  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep >/dev/null "bin/kibitz"'
 ( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >/dev/null 2>&1
 check "uninstall also removes a legacy-named hook" \
   '! jq -r ".hooks | tostring" "$INSTDIR/.claude/settings.json" | grep -qE "(kibitz|advisor) hook"'
@@ -536,13 +594,13 @@ cat >"$INSTDIR/.claude/settings.json" <<MIXED
 MIXED
 ( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
 check "install keeps a user command nested alongside ours" \
-  'jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep -q "echo theirs"' \
+  'jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep >/dev/null "echo theirs"' \
   "$(jq -r '[.hooks.Stop[].hooks[].command] | .[]' "$INSTDIR/.claude/settings.json" 2>/dev/null)"
 check "install still drops the nested legacy command" \
-  '! jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep -q "bin/advisor hook"'
+  '! jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep >/dev/null "bin/advisor hook"'
 ( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >/dev/null 2>&1
 check "uninstall keeps a user command nested alongside ours" \
-  'jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep -q "echo theirs"' \
+  'jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep >/dev/null "echo theirs"' \
   "$(jq -r '.hooks | tostring' "$INSTDIR/.claude/settings.json" 2>/dev/null)"
 
 printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}\n' \
@@ -550,8 +608,8 @@ printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]}
 ( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
 ( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >/dev/null 2>&1
 check "uninstall removes only our hooks" \
-  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "echo mine" &&
-   ! jq -r ".hooks | tostring" "$INSTDIR/.claude/settings.json" | grep -q "advisor hook"'
+  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep >/dev/null "echo mine" &&
+   ! jq -r ".hooks | tostring" "$INSTDIR/.claude/settings.json" | grep >/dev/null "advisor hook"'
 
 echo
 echo "upgrade from the two-file state layout"
@@ -563,18 +621,18 @@ MIGH="$(printf '%s' "$MIG" | cksum | tr -d ' ' | cut -c1-12)"
 mkdir -p "$ADVISOR_STATE_ROOT/projects/$MIGH"
 : >"$ADVISOR_STATE_ROOT/projects/$MIGH/enabled"
 check "a legacy enabled flag is honoured after upgrade" \
-  '"$ADV" status "$MIG" | grep -q "enabled : yes"' "$("$ADV" status "$MIG" | head -2)"
+  '"$ADV" status "$MIG" | grep >/dev/null "enabled : yes"' "$("$ADV" status "$MIG" | head -2)"
 check "the legacy flag is adopted into the state file" \
   '[ "$(cut -d" " -f1 "$ADVISOR_STATE_ROOT/projects/$MIGH/state")" = "1" ]'
 check "the legacy flag is removed once adopted" \
   '[ ! -f "$ADVISOR_STATE_ROOT/projects/$MIGH/enabled" ]'
 "$ADV" off "$MIG" >/dev/null
 check "off after migration is authoritative and stays off" \
-  '"$ADV" status "$MIG" | grep -q "enabled : no"' "$("$ADV" status "$MIG" | head -2)"
+  '"$ADV" status "$MIG" | grep >/dev/null "enabled : no"' "$("$ADV" status "$MIG" | head -2)"
 # Re-running status must not resurrect the flag from a stale file on disk.
 : >"$ADVISOR_STATE_ROOT/projects/$MIGH/enabled"
 check "a stale legacy flag cannot re-enable once state exists" \
-  '"$ADV" status "$MIG" | grep -q "enabled : no"' "$("$ADV" status "$MIG" | head -2)"
+  '"$ADV" status "$MIG" | grep >/dev/null "enabled : no"' "$("$ADV" status "$MIG" | head -2)"
 rm -rf "$MIG"
 
 echo
@@ -612,9 +670,9 @@ check "the operator log shows the kind" \
   'grep -q "(simpler approach)" "$(sdir)/advice.log"'
 out="$(fire PreToolUse)"
 check "the injected block labels each advisory with its kind" \
-  'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep -q "\[simpler approach\]"'
+  'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep >/dev/null "\[simpler approach\]"'
 check "stats reports what kinds were offered" \
-  '"$ADV" stats "$WORK" | grep -q "worth preserving"'
+  '"$ADV" stats "$WORK" | grep >/dev/null "worth preserving"'
 
 # mute
 "$ADV" mute "simpler approach" "$WORK" >/dev/null
@@ -622,10 +680,10 @@ rm -f "$(sdir)/seen"; find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 wait_idle
 PATH="$KINDBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "mute suppresses a matching advisory" \
-  '! find "$(sdir)/outbox" -name "*.json" | xargs -r cat | grep -q "simpler approach"'
+  '! find "$(sdir)/outbox" -name "*.json" | xargs -r cat | grep >/dev/null "simpler approach"'
 check "mute leaves everything else alone" \
-  'find "$(sdir)/outbox" -name "*.json" | xargs -r cat | grep -q "worth preserving"'
-check "mute list shows the pattern" '"$ADV" mute list "$WORK" | grep -q "simpler approach"'
+  'find "$(sdir)/outbox" -name "*.json" | xargs -r cat | grep >/dev/null "worth preserving"'
+check "mute list shows the pattern" '"$ADV" mute list "$WORK" | grep >/dev/null "simpler approach"'
 # A topic muted after an advisory is already queued must not still be delivered.
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant id-quiettopic "flaky test detector says hello"
@@ -633,7 +691,7 @@ plant id-quiettopic "flaky test detector says hello"
 check "mute also suppresses an advisory already queued for delivery" \
   '[ -z "$(fire PreToolUse)" ]' "a muted topic was delivered from the outbox"
 "$ADV" mute clear "$WORK" >/dev/null
-check "mute clear empties it" '"$ADV" mute list "$WORK" | grep -q "nothing muted"'
+check "mute clear empties it" '"$ADV" mute list "$WORK" | grep >/dev/null "nothing muted"'
 
 echo
 echo "register (decision 7)"
@@ -641,7 +699,7 @@ echo "register (decision 7)"
 check "no gate language in the prompt sent to Codex" \
   '"$ADV" lint "$HERE/../skills/kibitz/lib/prompt.tmpl" >/dev/null'
 check "no severity or verdict field in the advice schema" \
-  '! jq -e ".. | objects | has(\"severity\") or has(\"verdict\")" "$HERE/../skills/kibitz/lib/advice.schema.json" | grep -q true'
+  '! jq -e ".. | objects | has(\"severity\") or has(\"verdict\")" "$HERE/../skills/kibitz/lib/advice.schema.json" | grep >/dev/null true'
 check "schema permits an empty advisory list" \
   '[ "$(jq -r ".properties.advisories.minItems // 0" "$HERE/../skills/kibitz/lib/advice.schema.json")" = "0" ]'
 

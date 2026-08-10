@@ -15,10 +15,10 @@
 
 set -uo pipefail
 
-# Resolve symlinks before deriving the home directory. Invoked through a symlink
-# (a repo-root bin/, or a link created by a skill installer), dirname of
-# BASH_SOURCE gives the link's location, not the script's, and the sibling
-# lib/ and hooks.json are then looked for in the wrong place.
+# Resolve symlinks before deriving the plugin/skill root. Invoked through a
+# symlink (a repo-root bin/, or one created by a skill installer), dirname of
+# BASH_SOURCE gives the link's location rather than the script's, and the
+# sibling lib/ and install/ directories are then looked for in the wrong place.
 _advisor_self="${BASH_SOURCE[0]}"
 if command -v readlink >/dev/null && readlink -f "$_advisor_self" >/dev/null 2>&1; then
   _advisor_self="$(readlink -f "$_advisor_self")"
@@ -137,7 +137,7 @@ MIN_INTERVAL="${ADVISOR_MIN_INTERVAL:-45}"
 # Matches hooks this tool installed, including those written under its former
 # name. Without the legacy alternative, upgrading leaves dead `advisor hook`
 # commands registered alongside the new ones.
-OURS_RE="/bin/(kibitz|advisor) hook "
+OURS_RE="^\"?[^\"]*/bin/(kibitz|advisor)\"? hook [A-Za-z]+$"
 
 init_sess() {
   local d; d="$(sess_dir "$1" "$2")"
@@ -657,7 +657,7 @@ kibitz: refusing a user-scope install from a transient location.
 EOM
     return 1
   fi
-  tmpl="$ADVISOR_HOME/hooks.json"
+  tmpl="$ADVISOR_HOME/install/hooks.json"
   [ -f "$tmpl" ] || { echo "kibitz: missing $tmpl" >&2; return 1; }
   mkdir -p "$(dirname "$target")"
   [ -f "$target" ] || printf '{}\n' >"$target"
@@ -694,8 +694,9 @@ EOM
   echo "  restart Claude Code — hooks are snapshotted at session start."
 }
 
-# `npx skills add` drops the skill in a project's .agents/ and creates no PATH
-# entry, so `advisor ...` is not a runnable command after a fresh install.
+# Installed as a plugin, bin/ is on Claude Code's Bash-tool PATH -- but not on
+# the operator's shell PATH, and a plain (non-plugin) skill install gets neither.
+# This puts a shim somewhere the human's own shell can reach.
 cmd_link() {
   local dir="${1:-$HOME/.local/bin}"
   mkdir -p "$dir" || { echo "kibitz: cannot create $dir" >&2; return 1; }
