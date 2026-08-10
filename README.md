@@ -62,8 +62,9 @@ For a checkout that does not live in a skills directory, `kibitzer install` merg
 `settings.json`, preserving anything already there, and `kibitzer uninstall` removes only its own.
 
 If you registered hooks with a build from before the executable was renamed, those entries point at
-a `bin/kibitz` that no longer exists and are no longer recognised as ours — remove them by hand, or
-delete the `hooks` block and run `kibitzer install` again.
+a `bin/kibitz` that no longer exists and are no longer recognised as ours. Delete just those
+entries by hand — the ones whose command contains `/bin/kibitz hook` — then run `kibitzer install`.
+Do not clear the whole `hooks` block: it holds your other hooks too.
 `kibitzer install user` targets `~/.claude/settings.json` but refuses to run from a project-local or
 temporary checkout, since it bakes an absolute path into your global config. `kibitzer link` puts the
 command on your `PATH`. None of this is needed for a plugin install.

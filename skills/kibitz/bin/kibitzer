@@ -123,15 +123,6 @@ write_state() { # $1 cwd, $2 enabled(0|1) -- always advances the epoch
 }
 
 epoch_of() { local st; st="$(read_state "$1")"; printf '%s' "${st#* }"; }
-# Our own legacy (pre-quoting) registration, matched literally rather than by
-# pattern: unambiguous because we are the ones who wrote it. Callers must also
-# require the remainder to be a bare event token -- a prefix match alone would
-# delete `<home>/bin/kibitzer hook Stop; something-else`, which is a command the
-# user wrote, and that is exactly what the strict generic rule exists to avoid.
-#
-# Both binary names, because the pre-rename era and the unquoted era overlap: a
-# spaced checkout from back then registered `<home>/bin/advisor hook X`, which
-# the space-free generic rule cannot reach either.
 is_enabled() { local st; st="$(read_state "$1")"; [ "${st%% *}" = "1" ]; }
 is_quiet()   { [ -f "$(proj_dir "$1")/quiet" ]; }
 
@@ -148,9 +139,6 @@ is_navigation() { [ -n "$1" ] && [ "${NAVIGATION_TOOLS#*" $1 "}" != "$NAVIGATION
 # ignores this: errors are where advice pays.
 MIN_INTERVAL="${ADVISOR_MIN_INTERVAL:-45}"
 
-# Matches hooks this tool installed, including those written under its former
-# name. Without the legacy alternative, upgrading leaves dead `advisor hook`
-# commands registered alongside the new ones.
 # What counts as ours, stated exactly, because both install and uninstall DELETE
 # whatever matches. We write two shapes and no others: the plugin form
 # "${CLAUDE_PLUGIN_ROOT}"/bin/kibitzer hook <Event>, and the installer's
