@@ -579,6 +579,15 @@ LINKD="$WORK/linkbin"
 check "link creates exactly the command it reports" \
   '[ -L "$LINKD/kibitzer" ] && [ "$(find "$LINKD" -mindepth 1 | wc -l)" = "1" ]' \
   "$(ls -a "$LINKD" 2>/dev/null); $(cat "$WORK/link.out")"
+# Help text is the discovery path for the escape hatch: if it names the
+# colliding command, a user following it lands on /usr/bin/kibitz.
+check "help names the command link actually creates" \
+  '"$PLUG/bin/kibitzer" | grep >/dev/null "put a .kibitzer. command"' \
+  "$("$PLUG/bin/kibitzer" | grep link)"
+check "no help line tells the user to run a bare kibitz" \
+  '! "$PLUG/bin/kibitzer" | grep -E >/dev/null "^  kibitz( |$)|\`kibitz\`"' \
+  "$("$PLUG/bin/kibitzer" | grep -E "^  kibitz( |$)|.kibitz." || true)"
+
 check "the link resolves to the real executable" \
   '[ "$(readlink -f "$LINKD/kibitzer")" = "$(readlink -f "$PLUG/bin/kibitzer")" ]'
 check "link refuses to clobber a foreign command of the same name" \

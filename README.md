@@ -153,7 +153,7 @@ shell.
 bash tests/run-tests.sh
 ```
 
-117 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+119 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
 reading, invocation confinement, the plugin package (manifest, hook events, relocatable

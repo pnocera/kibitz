@@ -904,7 +904,7 @@ kibitz — Codex as a background advisory process for Claude Code
   kibitzer count [cwd]         pending count (for the statusline)
   kibitzer lint <file>         fail if a file contains review/gate language
   kibitzer doctor              check dependencies
-  kibitzer link [dir]          put a `kibitz` command on your PATH (~/.local/bin)
+  kibitzer link [dir]          put a `kibitzer` command on your PATH (~/.local/bin)
   kibitzer install [project|user]    merge hooks into settings.json (backed up)
   kibitzer uninstall [project|user]  remove them again
   kibitzer statusline [cwd]    pending-count segment for the status line
