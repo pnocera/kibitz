@@ -288,8 +288,18 @@ ${body}"
 
 # One record per file, published by atomic rename. Several PostToolUse hooks can
 # run concurrently, so a shared append-only file would interleave.
-publish_event() { # $1 dir, $2 event, $3 tool, $4 payload
+publish_event() { # $1 dir, $2 event, $3 tool, $4 payload, $5 cwd
   local d="$1" id rec
+  # Same boundary the drain observes: a hook that passed cmd_hook's enabled
+  # check can otherwise publish after `off` has cleared the queues, and a later
+  # `on` would resurrect activity from before the operator opted out.
+  [ -n "${ADVISOR_TEST_TAP_DELAY:-}" ] && sleep "$ADVISOR_TEST_TAP_DELAY"
+  # Shared, not exclusive: many PostToolUse hooks legitimately run at once and
+  # must all be able to publish. `off` takes the lock exclusively, so it still
+  # waits for in-flight producers before clearing.
+  exec 7>"$(proj_dir "$5")/control.lock"
+  flock -s -n 7 || return 0
+  is_enabled "$5" || return 0
   id="$(date +%s)-$$-$RANDOM"
   rec="$d/tmp/ev-$id.json"
   printf '%s' "$4" | jq -c --arg e "$2" --arg t "$3" --arg ts "$(date -Is)" \
@@ -338,7 +348,7 @@ cmd_hook() {
       is_navigation "$tool" && exit 0
       transcript="$(printf '%s' "$payload" | jq -r '.transcript_path // empty' 2>/dev/null)"
       d="$(sess_dir "$cwd" "$sid")"
-      publish_event "$d" "$event" "$tool" "$payload"
+      publish_event "$d" "$event" "$tool" "$payload" "$cwd"
       # A failed tool call is the highest-signal moment there is; skip the wait.
       [ "$event" = "PostToolUseFailure" ] && urgent=1
       maybe_spawn "$cwd" "$sid" "$transcript" "$urgent"
@@ -538,8 +548,24 @@ cmd_install() {
   case "$scope" in
     project) target="$PWD/.claude/settings.json" ;;
     user)    target="$HOME/.claude/settings.json" ;;
-    *) echo "usage: advisor install [project|user]" >&2; return 2 ;;
+    *) echo "usage: advisor install [project|user] [--force]" >&2; return 2 ;;
   esac
+  # A user-scope install bakes this checkout's absolute path into the global
+  # settings. If the checkout is project-local or temporary, deleting it later
+  # breaks the hooks in every Claude session, not just this project's.
+  if [ "$scope" = "user" ] && ! is_portable_home && [ "${2:-}" != "--force" ]; then
+    cat >&2 <<EOM
+advisor: refusing a user-scope install from a transient location.
+  This copy lives at:
+    $ADVISOR_HOME
+  Global hooks would hard-code that path, and every Claude session would break
+  if it is moved or removed. Either:
+    - clone advisor somewhere stable and run 'advisor install user' from there, or
+    - use 'advisor install' (project scope) here, or
+    - re-run with --force if you are sure this path is permanent.
+EOM
+    return 1
+  fi
   tmpl="$ADVISOR_HOME/hooks.json"
   [ -f "$tmpl" ] || { echo "advisor: missing $tmpl" >&2; return 1; }
   mkdir -p "$(dirname "$target")"
@@ -569,6 +595,30 @@ cmd_install() {
   mv "$tmp" "$target" || { rm -f "$tmp"; echo "advisor: could not replace $target" >&2; return 1; }
   echo "advisor: hooks installed in $target (backup: $target.advisor-backup)"
   echo "  restart Claude Code — hooks are snapshotted at session start."
+}
+
+# `npx skills add` drops the skill in a project's .agents/ and creates no PATH
+# entry, so `advisor ...` is not a runnable command after a fresh install.
+cmd_link() {
+  local dir="${1:-$HOME/.local/bin}"
+  mkdir -p "$dir" || { echo "advisor: cannot create $dir" >&2; return 1; }
+  ln -sfn "$ADVISOR_HOME/bin/advisor" "$dir/advisor" ||
+    { echo "advisor: cannot link into $dir" >&2; return 1; }
+  echo "advisor: linked $dir/advisor -> $ADVISOR_HOME/bin/advisor"
+  case ":$PATH:" in
+    *":$dir:"*) : ;;
+    *) echo "  note: $dir is not on your PATH" >&2 ;;
+  esac
+  is_portable_home || echo "  note: this links to a project-local checkout; see 'advisor install user'" >&2
+}
+
+# A user-scope install writes this checkout's absolute path into the global
+# settings, so it must not point at somewhere transient.
+is_portable_home() {
+  case "$ADVISOR_HOME" in
+    */.agents/skills/*|*/node_modules/*|/tmp/*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 cmd_uninstall() {
@@ -629,6 +679,7 @@ advisor — Codex as a background advisory process for Claude Code
   advisor count [cwd]         pending count (for the statusline)
   advisor lint <file>         fail if a file contains review/gate language
   advisor doctor              check dependencies
+  advisor link [dir]          put an `advisor` command on your PATH (~/.local/bin)
   advisor install [project|user]    merge hooks into settings.json (backed up)
   advisor uninstall [project|user]  remove them again
   advisor statusline [cwd]    pending-count segment for the status line
@@ -649,6 +700,7 @@ case "${1:-}" in
   pane)    shift; cmd_pane "$@" ;;
   lint)    shift; cmd_lint "$@" ;;
   install)   shift; cmd_install "$@" ;;
+  link)      shift; cmd_link "$@" ;;
   uninstall) shift; cmd_uninstall "$@" ;;
   statusline) shift; cmd_statusline "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;

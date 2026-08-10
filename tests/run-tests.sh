@@ -402,6 +402,21 @@ PATH="$CAPBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "a cycle after off->on sees no pre-off activity" \
   '! grep -q "Edit" "$PROMPTCAP"' "$(grep -A3 "Tool calls" "$PROMPTCAP" 2>/dev/null | head -4)"
 
+# An in-flight tap hook must not publish after off has cleared the queues.
+"$ADV" on "$WORK" >/dev/null
+date +%s >"$(sdir)/last-cycle"
+find "$(sdir)/events" "$(sdir)/events-processing" -name '*.json' -delete 2>/dev/null
+( jq -cn --arg c "$WORK" --arg s "$SID" \
+    '{cwd:$c, session_id:$s, transcript_path:"", tool_name:"Edit",
+      tool_input:{f:"x.rs"}, tool_response:{error:""}}' |
+  ADVISOR_TEST_TAP_DELAY=0.6 ADVISOR_MIN_INTERVAL=99999 "$ADV" hook PostToolUse >/dev/null 2>&1 ) &
+TPID=$!
+sleep 0.2
+"$ADV" off "$WORK" >/dev/null
+wait "$TPID" 2>/dev/null
+check "an in-flight tap hook publishes nothing once off lands" \
+  '[ "$(evcount)" -eq 0 ]' "a tap event was written after off cleared the queues"
+
 echo
 echo "install through a symlink  (found by the advisor, on itself)"
 

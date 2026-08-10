@@ -21,20 +21,27 @@ turn ends ────► hook ─────────────┴─► 
 npx skills add pnocera/advisor
 ```
 
-Then, in the project you want it to watch:
+That installs to `.agents/skills/advisor/` and symlinks it for Claude Code. It does **not** put an
+`advisor` command on your PATH, so either use the full path or make a shim:
 
 ```bash
-advisor doctor      # check dependencies
-advisor install     # merge hooks into .claude/settings.json (existing hooks preserved)
-advisor on          # opt in for this directory
+ADV=./.agents/skills/advisor/bin/advisor
+$ADV link            # optional: puts `advisor` in ~/.local/bin
+$ADV doctor          # check dependencies
+$ADV install         # merge hooks into .claude/settings.json (existing hooks preserved)
+$ADV on              # opt in for this directory
 ```
 
 **Restart Claude Code after `install`** — hooks are snapshotted at session start, so changes to
 `settings.json` do not take effect in a running session.
 
-Requires `codex` (tested on codex-cli 0.147.0), `jq`, and coreutils. `advisor install user` writes
-to `~/.claude/settings.json` instead of the project. Both back up the file first, and
-`advisor uninstall` removes only advisor's own hooks.
+Requires `codex` (tested on codex-cli 0.147.0), `jq`, and coreutils.
+
+`advisor install user` writes to `~/.claude/settings.json` instead of the project — but it bakes
+this checkout's absolute path into your global config, so it refuses to run from a project-local or
+temporary location. For a user-scope install, clone the repo somewhere stable and run it from there.
+Both scopes back the file up first and write via atomic rename; `advisor uninstall [project|user]`
+removes only advisor's own hooks.
 
 ## Use
 
@@ -102,7 +109,7 @@ shell.
 bash tests/run-tests.sh
 ```
 
-68 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+69 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
 reading, invocation confinement, install/uninstall merge safety, and hot-path latency.
