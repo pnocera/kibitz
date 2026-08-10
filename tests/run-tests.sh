@@ -533,6 +533,23 @@ check "uninstall removes the quoted spaced-path hook" \
   '[ -z "$(jq -r ".hooks.Stop[]?.hooks[]?.command // empty" "$SPROJ/.claude/settings.json" 2>/dev/null)" ]' \
   "$(jq -c '.hooks' "$SPROJ/.claude/settings.json" 2>/dev/null)"
 
+# Earlier versions wrote the executable unquoted, so a checkout under a spaced
+# path produced a hook the tightened matcher would not recognise. Refusing it
+# strands a dead command on every event; the spaced-path test above starts from
+# a freshly generated quoted hook and never exercises this.
+LEGACY="$WORK/legacyspace"; mkdir -p "$LEGACY/.claude"
+for op in install uninstall; do
+  jq -n '{hooks:{Stop:[{hooks:[{type:"command",
+    command:"/tmp/dir with space/kibitz/bin/kibitz hook Stop"}]}]}}' \
+    >"$LEGACY/.claude/settings.json"
+  ( cd "$LEGACY" && "$PLUG/bin/kibitz" "$op" project ) >/dev/null 2>&1
+  left=$(jq -r '[.hooks.Stop[]?.hooks[]?.command]
+                | map(select(contains("dir with space"))) | length' \
+         "$LEGACY/.claude/settings.json" 2>/dev/null)
+  check "$op clears a legacy unquoted hook from a spaced checkout" \
+    '[ "$left" = "0" ]' "$(jq -c '.hooks' "$LEGACY/.claude/settings.json" 2>/dev/null)"
+done
+
 # A command that merely contains our path is not ours. The unquoted forms are
 # the dangerous ones: an earlier "anchored" regex still matched them, and the
 # regression missed it by only testing the quoted shape, which never matched.

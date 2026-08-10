@@ -150,7 +150,14 @@ MIN_INTERVAL="${ADVISOR_MIN_INTERVAL:-45}"
 # install would otherwise leave two hooks on every event, one of them dead.
 # The cost is that a second, independent kibitz install is also displaced. That
 # is the intended trade: two kibitz hooks on one event is never what you want.
-OURS_RE='^("\$\{CLAUDE_PLUGIN_ROOT\}"/bin/(kibitz|advisor)|"/[^"]*/bin/(kibitz|advisor)"|/[^ "]*/bin/(kibitz|advisor)) hook [A-Za-z]+$'
+#
+# The unquoted branch permits spaces, which is deliberate and not free. Earlier
+# versions wrote the path unquoted, so a checkout under "/dir with space" left a
+# hook only this branch can still recognise -- refusing it would strand a dead
+# command that fires on every event forever. The cost is that a wrapper starting
+# with an absolute path, `/usr/bin/logger /x/bin/kibitz hook Stop`, is claimed
+# too. A command with a bare leading word (`logger ...`, `env X=1 ...`) is not.
+OURS_RE='^("\$\{CLAUDE_PLUGIN_ROOT\}"/bin/(kibitz|advisor)|"/[^"]*/bin/(kibitz|advisor)"|/[^"]*/bin/(kibitz|advisor)) hook [A-Za-z]+$'
 
 init_sess() {
   local d; d="$(sess_dir "$1" "$2")"
