@@ -629,17 +629,20 @@ runtimeout="$("$PLUG/bin/kibitzer" lint "$PLUG/SKILL.md" 2>&1
 check "runtime diagnostics never print a bare kibitz command" \
   '! printf "%s" "$runtimeout" | grep -qE "(^|[^-a-zA-Z0-9_/])kibitz [a-z]"' "$runtimeout"
 
-# Static and exhaustive, where the runtime sample cannot be: any echo/printf in
-# the source that would tell a user to run a bare `kibitz <subcommand>`, in any
-# handler, whether or not a test happens to invoke it.
-stalesrc="$(grep -nE '(echo|printf)[^#]*[^-a-zA-Z0-9_/]kibitz ('"$SUBRE"')' \
+# Static and genuinely exhaustive: the whole source, not just echo/printf lines.
+# Gating on those missed heredocs -- cmd_install's guidance block and usage() are
+# both `cat <<EOF`, and a stale command in either would have passed.
+stalesrc="$(grep -nE "(^|[^-a-zA-Z0-9_/])kibitz ($SUBRE)([^a-zA-Z0-9-]|\$)" \
             "$PLUG/bin/kibitzer" || true)"
 check "no message anywhere in the source names a bare kibitz command" \
   '[ -z "$stalesrc" ]' "$stalesrc"
-# Whitespace-insensitive, so a label like `kibitz  <cwd>` cannot hide behind an
-# extra space: no printed line may begin with the shadowed name at all.
+# Diagnostic labels only, and deliberately not the help title: usage() opens with
+# `kibitz — Codex as a…`, which is the product name, not something to type. The
+# command-shaped scans above cannot see a label like `kibitz  <cwd>`, because two
+# spaces stop `kibitz ` from being followed by a word.
 badlabel="$(grep -nE "(echo|printf) +[\"']kibitz[^e]" "$PLUG/bin/kibitzer" || true)"
-check "no printed line starts with the shadowed name" '[ -z "$badlabel" ]' "$badlabel"
+check "no echo/printf diagnostic label uses the shadowed name" \
+  '[ -z "$badlabel" ]' "$badlabel"
 
 check "no help line tells the user to run a bare kibitz" \
   '! "$PLUG/bin/kibitzer" | grep -E >/dev/null "^  kibitz( |$)|\`kibitz\`"' \
