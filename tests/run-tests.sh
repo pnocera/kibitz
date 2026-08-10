@@ -4,7 +4,7 @@
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ADV="$HERE/../skills/kibitz/bin/kibitz"
+ADV="$HERE/../skills/kibitz/bin/kibitzer"
 export ADVISOR_STATE_ROOT
 ADVISOR_STATE_ROOT="$(mktemp -d)"
 WORK="$(mktemp -d)"
@@ -484,7 +484,7 @@ check "plugin hooks cover every event the tap needs" \
 HOOKTOTAL=$(jq -r '[.hooks[][].hooks[].command] | length' "$PLUG/hooks/hooks.json")
 # startswith, not contains: `echo CLAUDE_PLUGIN_ROOT; /baked/path/kibitz ...`
 # would satisfy a substring check while reintroducing an absolute path.
-HOOKPREFIX='"${CLAUDE_PLUGIN_ROOT}"/bin/kibitz hook '
+HOOKPREFIX='"${CLAUDE_PLUGIN_ROOT}"/bin/kibitzer hook '
 HOOKROOTED=$(jq -r --arg p "$HOOKPREFIX" '[.hooks[][].hooks[].command]
                     | map(select(startswith($p))) | length' "$PLUG/hooks/hooks.json")
 check "every plugin hook resolves through CLAUDE_PLUGIN_ROOT" \
@@ -510,7 +510,7 @@ check "both configs cover the same events" \
 
 check "no absolute path leaks into the plugin hooks" \
   '! grep -q "/home/" "$PLUG/hooks/hooks.json"'
-check "the executable the hooks name is present and runnable" '[ -x "$PLUG/bin/kibitz" ]'
+check "the executable the hooks name is present and runnable" '[ -x "$PLUG/bin/kibitzer" ]'
 check "the legacy settings.json template is out of the plugin hook path" \
   '[ -f "$PLUG/install/hooks.json" ] && [ ! -f "$PLUG/hooks.json" ]'
 
@@ -522,109 +522,29 @@ check "the legacy settings.json template is out of the plugin hook path" \
 SPACED="$WORK/dir with space"; mkdir -p "$SPACED"
 cp -r "$PLUG" "$SPACED/kibitz"
 SPROJ="$WORK/spaceproj"; mkdir -p "$SPROJ/.claude"
-( cd "$SPROJ" && "$SPACED/kibitz/bin/kibitz" install project ) >/dev/null 2>&1
+( cd "$SPROJ" && "$SPACED/kibitz/bin/kibitzer" install project ) >/dev/null 2>&1
 scmd=$(jq -r '.hooks.Stop[]?.hooks[]?.command' "$SPROJ/.claude/settings.json" 2>/dev/null)
 check "a checkout path with spaces yields a quoted, runnable command" \
   '[ "${scmd:0:1}" = "\"" ]' "$scmd"
 check "and the quoted executable actually exists" \
   'eval "[ -x ${scmd% hook Stop} ]"' "$scmd"
-( cd "$SPROJ" && "$SPACED/kibitz/bin/kibitz" uninstall project ) >/dev/null 2>&1
+( cd "$SPROJ" && "$SPACED/kibitz/bin/kibitzer" uninstall project ) >/dev/null 2>&1
 check "uninstall removes the quoted spaced-path hook" \
   '[ -z "$(jq -r ".hooks.Stop[]?.hooks[]?.command // empty" "$SPROJ/.claude/settings.json" 2>/dev/null)" ]' \
   "$(jq -c '.hooks' "$SPROJ/.claude/settings.json" 2>/dev/null)"
 
-# Legacy cleanup is now provenance-based. A hook this checkout wrote in the
-# unquoted era is matched by its literal path, spaces and all...
-LEGACY="$WORK/legacyspace"; mkdir -p "$LEGACY/.claude"
-SPACED2="$WORK/legacy dir/kibitz"; mkdir -p "$(dirname "$SPACED2")"
-cp -r "$PLUG" "$SPACED2"
-for op in install uninstall; do
-  jq -n --arg c "$SPACED2/bin/kibitz hook Stop" \
-    '{hooks:{Stop:[{hooks:[{type:"command",command:$c}]}]}}' >"$LEGACY/.claude/settings.json"
-  ( cd "$LEGACY" && "$SPACED2/bin/kibitz" "$op" project ) >/dev/null 2>&1
-  left=$(jq -r --arg c "$SPACED2/bin/kibitz hook Stop" \
-    '[.hooks.Stop[]?.hooks[]?.command] | map(select(. == $c)) | length' \
-    "$LEGACY/.claude/settings.json" 2>/dev/null)
-  check "$op clears this checkout's own legacy unquoted spaced hook" \
-    '[ "${left:-1}" = "0" ]' "$(jq -c '.hooks' "$LEGACY/.claude/settings.json" 2>/dev/null)"
-done
-
-# The provenance rule is a literal path match, so it needs the same exactness as
-# the generic one: a bare prefix would claim anything a user appended to it.
-jq -n --arg a "$SPACED2/bin/kibitz hook Stop; echo mine" \
-      --arg b "$SPACED2/bin/kibitz hook Stop --extra" \
-      --arg c "$SPACED2/bin/kibitz hook Stop" \
-  '{hooks:{Stop:[{hooks:[{type:"command",command:$a},
-                         {type:"command",command:$b},
-                         {type:"command",command:$c}]}]}}' >"$LEGACY/.claude/settings.json"
-( cd "$LEGACY" && "$SPACED2/bin/kibitz" uninstall project ) >/dev/null 2>&1
-surv=$(jq -r '[.hooks.Stop[]?.hooks[]?.command] | length' "$LEGACY/.claude/settings.json" 2>/dev/null)
-check "provenance matching keeps commands that only start with ours" \
-  '[ "${surv:-0}" = "2" ]' "$(jq -r '.hooks.Stop[]?.hooks[]?.command // empty' "$LEGACY/.claude/settings.json" 2>/dev/null)"
-check "and still removes the bare legacy command itself" \
-  '! jq -r ".hooks.Stop[]?.hooks[]?.command // empty" "$LEGACY/.claude/settings.json" | grep >/dev/null -x "$SPACED2/bin/kibitz hook Stop"'
-
-# The pre-rename era and the unquoted era overlap: a spaced checkout back then
-# registered bin/advisor, which the space-free generic rule cannot reach either.
-for op in install uninstall; do
-  jq -n --arg a "$SPACED2/bin/advisor hook Stop" \
-        --arg b "$SPACED2/bin/advisor hook Stop; mine" \
-    '{hooks:{Stop:[{hooks:[{type:"command",command:$a},
-                           {type:"command",command:$b}]}]}}' >"$LEGACY/.claude/settings.json"
-  ( cd "$LEGACY" && "$SPACED2/bin/kibitz" "$op" project ) >/dev/null 2>&1
-  bare=$(jq -r --arg c "$SPACED2/bin/advisor hook Stop" \
-    '[.hooks.Stop[]?.hooks[]?.command] | map(select(. == $c)) | length' \
-    "$LEGACY/.claude/settings.json" 2>/dev/null)
-  appended=$(jq -r --arg c "$SPACED2/bin/advisor hook Stop; mine" \
-    '[.hooks.Stop[]?.hooks[]?.command] | map(select(. == $c)) | length' \
-    "$LEGACY/.claude/settings.json" 2>/dev/null)
-  check "$op clears a pre-rename spaced legacy hook" '[ "${bare:-1}" = "0" ]' \
-    "$(jq -c '.hooks' "$LEGACY/.claude/settings.json" 2>/dev/null)"
-  check "$op keeps a user command appended to the pre-rename one" '[ "${appended:-0}" = "1" ]'
-done
-
-# ...but a legacy spaced hook left by a checkout that has since MOVED is not.
-# Deliberate: the generic rule cannot tell where an unquoted spaced path ends,
-# and guessing means deleting commands users wrote. Documented limit, not a bug.
-jq -n '{hooks:{Stop:[{hooks:[{type:"command",
-  command:"/gone/old dir/kibitz/bin/kibitz hook Stop"}]}]}}' >"$LEGACY/.claude/settings.json"
-( cd "$LEGACY" && "$PLUG/bin/kibitz" uninstall project ) >/dev/null 2>&1
-check "a legacy spaced hook from a moved checkout survives (documented limit)" \
-  'jq -r ".hooks.Stop[]?.hooks[]?.command" "$LEGACY/.claude/settings.json" | grep >/dev/null "old dir"' \
-  "$(jq -c '.hooks' "$LEGACY/.claude/settings.json" 2>/dev/null)"
-
-# A command that merely contains our path is not ours. The unquoted forms are
-# the dangerous ones: an earlier "anchored" regex still matched them, and the
-# regression missed it by only testing the quoted shape, which never matched.
 MIXDIR="$WORK/anchor"; mkdir -p "$MIXDIR/.claude"
-i=0
-for foreign in "logger /bin/kibitz hook Stop" \
-               "env X=1 /bin/kibitz hook Stop" \
-               "echo foo/bin/kibitz hook Stop" \
-               "logger '/bin/advisor hook Stop'"; do
-  i=$((i+1))
-  for op in install uninstall; do
-    jq -n --arg c "$foreign" \
-      '{hooks:{Stop:[{hooks:[{type:"command",command:$c}]}]}}' >"$MIXDIR/.claude/settings.json"
-    ( cd "$MIXDIR" && "$PLUG/bin/kibitz" "$op" project ) >/dev/null 2>&1
-    surv=$(jq -r --arg c "$foreign" \
-      '[.hooks.Stop[]?.hooks[]?.command] | map(select(. == $c)) | length' \
-      "$MIXDIR/.claude/settings.json" 2>/dev/null)
-    check "$op keeps a foreign command #$i that merely contains our path" \
-      '[ "$surv" = "1" ]' "$foreign -> $(jq -c '.hooks' "$MIXDIR/.claude/settings.json" 2>/dev/null)"
-  done
-done
 
 # An absolute-prefixed wrapper is somebody else's command and must survive.
 # An earlier revision claimed it, to reach legacy spaced hooks; provenance
 # matching reaches those instead, so the promise no longer has an exception.
 # The quoted form is different and is asserted separately below.
-for wrapper in "/usr/bin/logger /x/bin/kibitz hook Stop" \
-               "/usr/bin/env X=1 /x/bin/advisor hook Stop"; do
+for wrapper in "/usr/bin/logger /x/bin/kibitzer hook Stop" \
+               "/usr/bin/env X=1 /x/bin/kibitzer hook Stop"; do
   for op in install uninstall; do
     jq -n --arg c "$wrapper" '{hooks:{Stop:[{hooks:[{type:"command",command:$c}]}]}}' \
       >"$MIXDIR/.claude/settings.json"
-    ( cd "$MIXDIR" && "$PLUG/bin/kibitz" "$op" project ) >/dev/null 2>&1
+    ( cd "$MIXDIR" && "$PLUG/bin/kibitzer" "$op" project ) >/dev/null 2>&1
     kept=$(jq -r --arg c "$wrapper" '[.hooks.Stop[]?.hooks[]?.command]
                                      | map(select(. == $c)) | length' \
            "$MIXDIR/.claude/settings.json" 2>/dev/null)
@@ -632,14 +552,29 @@ for wrapper in "/usr/bin/logger /x/bin/kibitz hook Stop" \
   done
 done
 
-# Quoted, it is one executable path ending in /bin/kibitz -- not a wrapper --
+# Quoted, it is one executable path ending in /bin/kibitzer -- not a wrapper --
 # so claiming it is correct rather than a cost.
 jq -n '{hooks:{Stop:[{hooks:[{type:"command",
-  command:"\"/usr/bin/logger /x/bin/kibitz\" hook Stop"}]}]}}' >"$MIXDIR/.claude/settings.json"
-( cd "$MIXDIR" && "$PLUG/bin/kibitz" uninstall project ) >/dev/null 2>&1
-check "a quoted path ending in /bin/kibitz is claimed" \
+  command:"\"/usr/bin/logger /x/bin/kibitzer\" hook Stop"}]}]}}' >"$MIXDIR/.claude/settings.json"
+( cd "$MIXDIR" && "$PLUG/bin/kibitzer" uninstall project ) >/dev/null 2>&1
+check "a quoted path ending in /bin/kibitzer is claimed" \
   '[ -z "$(jq -r ".hooks.Stop[]?.hooks[]?.command // empty" "$MIXDIR/.claude/settings.json" 2>/dev/null)" ]' \
   "$(jq -c '.hooks' "$MIXDIR/.claude/settings.json" 2>/dev/null)"
+
+echo
+echo "the executable name"
+
+# /usr/bin/kibitz is expect(1)'s utility on most Debian/Ubuntu systems. A plugin
+# bin/ named kibitz is shadowed by it, and `kibitz on` silently runs the wrong
+# program -- which is exactly what happened on a real install.
+check "the shipped executable is not named kibitz" '[ ! -e "$PLUG/bin/kibitz" ]' \
+  "$(ls "$PLUG/bin")"
+check "it is named kibitzer and is runnable" '[ -x "$PLUG/bin/kibitzer" ]'
+# Scoped to our own path shape: the docs legitimately mention /usr/bin/kibitz
+# when explaining why the executable is not called that.
+check "no config or doc invokes a bin/kibitz we no longer ship" \
+  '! grep -rnE "(skills/kibitz|PLUGIN_ROOT.)/bin/kibitz[^e]" \
+      "$PLUG/hooks" "$PLUG/install" "$PLUG/SKILL.md" >/dev/null'
 
 echo
 echo "install through a symlink  (found by the advisor, on itself)"
@@ -649,24 +584,24 @@ echo "install through a symlink  (found by the advisor, on itself)"
 # hooks.json must still be found.
 LINKROOT="$WORK/linkroot"; mkdir -p "$LINKROOT"
 ln -sfn "$HERE/../skills/kibitz/bin" "$LINKROOT/bin"
-( cd "$LINKROOT" && ./bin/kibitz doctor ) >"$WORK/doctor.out" 2>&1
+( cd "$LINKROOT" && ./bin/kibitzer doctor ) >"$WORK/doctor.out" 2>&1
 check "doctor finds schema and prompt through a symlinked bin/" \
   '[ -s "$WORK/doctor.out" ] && ! grep -q "MISS" "$WORK/doctor.out"' "$(cat "$WORK/doctor.out")"
 
 INSTDIR="$WORK/instproj"; mkdir -p "$INSTDIR"
-( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >"$WORK/install.out" 2>&1
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitzer" install project ) >"$WORK/install.out" 2>&1
 check "install works through a symlink with no ADVISOR_HOME override" \
   '[ -f "$INSTDIR/.claude/settings.json" ]' "$(cat "$WORK/install.out")"
 check "install registers the tap events too" \
   'jq -e ".hooks.PostToolUse and .hooks.PostToolUseFailure and .hooks.Stop" "$INSTDIR/.claude/settings.json" >/dev/null'
 check "installed commands point at the real script, not the symlink dir" \
-  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep >/dev/null "skills/kibitz/bin/kibitz"'
+  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep >/dev/null "skills/kibitz/bin/kibitzer"'
 
 # Existing hooks must survive, and uninstall must put things back.
 # Uninstall on a project that never installed anything is a no-op, not an error,
 # and must not invent a hooks key in a file that had none.
 printf '{"model":"x"}\n' >"$INSTDIR/.claude/settings.json"
-( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >"$WORK/un.out" 2>&1
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitzer" uninstall project ) >"$WORK/un.out" 2>&1
 UNRC=$?   # capture immediately: inside check's eval, $? is the previous command
 check "uninstall succeeds on settings with no hooks at all" \
   '[ "$UNRC" -eq 0 ]' "rc=$UNRC $(cat "$WORK/un.out")"
@@ -676,54 +611,38 @@ check "uninstall leaves a hookless file untouched" \
 
 printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}\n' \
   >"$INSTDIR/.claude/settings.json"
-( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitzer" install project ) >/dev/null 2>&1
 check "install preserves a pre-existing hook on the same event" \
   'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep >/dev/null "echo mine"'
 check "install preserves unrelated settings" \
   '[ "$(jq -r ".model" "$INSTDIR/.claude/settings.json")" = "x" ]'
-# Upgrading from the pre-rename binary must clean up, not duplicate. A matcher
-# that only knows the current name leaves a dead command registered on every
-# event, which then runs and fails for the life of every session.
-cat >"$INSTDIR/.claude/settings.json" <<LEGACY
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/old/path/skills/advisor/bin/advisor hook Stop","timeout":2}]}]},"model":"x"}
-LEGACY
-( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
-check "install replaces a hook left by the former binary name" \
-  '[ "$(jq -r "[.hooks.Stop[].hooks[].command] | length" "$INSTDIR/.claude/settings.json")" = "1" ]' \
-  "$(jq -r '[.hooks.Stop[].hooks[].command] | .[]' "$INSTDIR/.claude/settings.json" 2>/dev/null)"
-check "the surviving hook is the current one" \
-  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep >/dev/null "bin/kibitz"'
-( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >/dev/null 2>&1
-check "uninstall also removes a legacy-named hook" \
-  '! jq -r ".hooks | tostring" "$INSTDIR/.claude/settings.json" | grep -qE "(kibitz|advisor) hook"'
-
 printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}\n' \
   >"$INSTDIR/.claude/settings.json"
-( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitzer" install project ) >/dev/null 2>&1
 # Claude allows several commands inside one hook group. Filtering by group
 # instead of by command destroys a user's command that happens to sit next to
 # ours -- the previous tests only ever used separate groups, so they missed it.
 cat >"$INSTDIR/.claude/settings.json" <<MIXED
 {"hooks":{"Stop":[{"hooks":[
   {"type":"command","command":"echo theirs","timeout":2},
-  {"type":"command","command":"/old/skills/advisor/bin/advisor hook Stop","timeout":2}
+  {"type":"command","command":"/old/skills/kibitz/bin/kibitzer hook Stop","timeout":2}
 ]}]},"model":"x"}
 MIXED
-( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitzer" install project ) >/dev/null 2>&1
 check "install keeps a user command nested alongside ours" \
   'jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep >/dev/null "echo theirs"' \
   "$(jq -r '[.hooks.Stop[].hooks[].command] | .[]' "$INSTDIR/.claude/settings.json" 2>/dev/null)"
-check "install still drops the nested legacy command" \
-  '! jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep >/dev/null "bin/advisor hook"'
-( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >/dev/null 2>&1
+check "install still drops a stale hook nested alongside it" \
+  '! jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep >/dev/null "/old/skills"'
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitzer" uninstall project ) >/dev/null 2>&1
 check "uninstall keeps a user command nested alongside ours" \
   'jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep >/dev/null "echo theirs"' \
   "$(jq -r '.hooks | tostring' "$INSTDIR/.claude/settings.json" 2>/dev/null)"
 
 printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}\n' \
   >"$INSTDIR/.claude/settings.json"
-( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
-( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >/dev/null 2>&1
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitzer" install project ) >/dev/null 2>&1
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitzer" uninstall project ) >/dev/null 2>&1
 check "uninstall removes only our hooks" \
   'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep >/dev/null "echo mine" &&
    ! jq -r ".hooks | tostring" "$INSTDIR/.claude/settings.json" | grep >/dev/null "advisor hook"'

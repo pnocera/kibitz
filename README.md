@@ -23,21 +23,26 @@ npx skills add -g -a claude-code pnocera/kibitz
 
 Restart Claude Code, then ask it to opt in for the current directory:
 
-> run `kibitz on`
+> run `kibitzer on`
 
 That is the whole installation. kibitz ships as a Claude Code **plugin**, so the hooks come with it:
 nothing to merge into `settings.json`.
 
-Note that `kibitz` is on **Claude Code's Bash tool** `PATH`, not your shell's — that is what plugins
+Note that `kibitzer` is on **Claude Code's Bash tool** `PATH`, not your shell's — that is what plugins
 expose. Asking Claude to run it works; typing it in your own terminal will not, unless you use the
-full path or run `kibitz link`:
+full path or run `kibitzer link`:
 
 ```bash
-~/.claude/skills/kibitz/bin/kibitz on     # or: ... link, for a ~/.local/bin shim
+~/.claude/skills/kibitz/bin/kibitzer on     # or: ... link, for a ~/.local/bin shim
 ```
 
 Named kibitz because Claude Code already has a built-in `/advisor`, and shadowing it is a bad idea.
 (A kibitzer is someone who watches over your shoulder and offers unsolicited advice.)
+
+The skill is `/kibitz`; the executable is **`kibitzer`**. `/usr/bin/kibitz` is expect(1)'s utility on
+most Debian/Ubuntu systems, and a plugin's `bin/` does not win over `/usr/bin`, so naming the
+executable `kibitz` means the wrong program runs. If `kibitzer` is shadowed on your machine, call it
+by path: `~/.claude/skills/kibitz/bin/kibitzer`.
 
 **Why those two flags.** `-a claude-code` matters: without it the installer symlinks the skill into
 every agent directory it knows about — around fifty of them — and kibitz is useless to all of them,
@@ -53,10 +58,10 @@ Requires `codex` (tested on codex-cli 0.147.0), `jq`, and coreutils.
 <details>
 <summary>Registering hooks by hand instead</summary>
 
-For a checkout that does not live in a skills directory, `kibitz install` merges hooks into
+For a checkout that does not live in a skills directory, `kibitzer install` merges hooks into
 `settings.json`, preserving anything already there, and `kibitz uninstall` removes only its own.
-`kibitz install user` targets `~/.claude/settings.json` but refuses to run from a project-local or
-temporary checkout, since it bakes an absolute path into your global config. `kibitz link` puts the
+`kibitzer install user` targets `~/.claude/settings.json` but refuses to run from a project-local or
+temporary checkout, since it bakes an absolute path into your global config. `kibitzer link` puts the
 command on your `PATH`. None of this is needed for a plugin install.
 
 </details>
@@ -64,17 +69,17 @@ command on your `PATH`. None of this is needed for a plugin install.
 ## Use
 
 ```
-kibitz on | off                 opt in / out for this directory
-kibitz quiet on | off           keep analysing and logging, stop injecting
-kibitz status                   what is enabled, pending, running
-kibitz log [cwd] [n]            what has been said
-kibitz tail [cwd]               follow it live
-kibitz pane [cwd]               Herdr side pane following the log
-kibitz statusline [cwd]         pending-count segment for your status line
-kibitz advise-now [cwd]         ask for a contribution now, without waiting
-kibitz mute <text>|list|clear   stop hearing about a topic
-kibitz stats [cwd]              what kinds of things it has been saying
-kibitz lint <file>              fail if a file reads like a review gate
+kibitzer on | off                 opt in / out for this directory
+kibitzer quiet on | off           keep analysing and logging, stop injecting
+kibitzer status                   what is enabled, pending, running
+kibitzer log [cwd] [n]            what has been said
+kibitzer tail [cwd]               follow it live
+kibitzer pane [cwd]               Herdr side pane following the log
+kibitzer statusline [cwd]         pending-count segment for your status line
+kibitzer advise-now [cwd]         ask for a contribution now, without waiting
+kibitzer mute <text>|list|clear   stop hearing about a topic
+kibitzer stats [cwd]              what kinds of things it has been saying
+kibitzer lint <file>              fail if a file reads like a review gate
 ```
 
 Default is **off**, per directory. `off` is immediate: it disables, reaps any in-flight Codex, and
@@ -98,7 +103,7 @@ severity enum is a review rubric wearing a JSON hat.
 
 It does say explicitly that the range is wider than fault-finding: a simpler approach, an unexamined
 assumption, something worth preserving. Each advisory carries a free-text `kind` in Codex's own
-words, and `kibitz stats` counts them, so whether the constructive half actually materialises is
+words, and `kibitzer stats` counts them, so whether the constructive half actually materialises is
 measured rather than assumed.
 
 **What it costs you.** At most 3 advisories per tool call. Hooks do file I/O only and run in tens of
@@ -148,7 +153,7 @@ shell.
 bash tests/run-tests.sh
 ```
 
-131 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+114 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
 reading, invocation confinement, the plugin package (manifest, hook events, relocatable
