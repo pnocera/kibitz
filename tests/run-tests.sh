@@ -564,6 +564,25 @@ check "provenance matching keeps commands that only start with ours" \
 check "and still removes the bare legacy command itself" \
   '! jq -r ".hooks.Stop[]?.hooks[]?.command // empty" "$LEGACY/.claude/settings.json" | grep >/dev/null -x "$SPACED2/bin/kibitz hook Stop"'
 
+# The pre-rename era and the unquoted era overlap: a spaced checkout back then
+# registered bin/advisor, which the space-free generic rule cannot reach either.
+for op in install uninstall; do
+  jq -n --arg a "$SPACED2/bin/advisor hook Stop" \
+        --arg b "$SPACED2/bin/advisor hook Stop; mine" \
+    '{hooks:{Stop:[{hooks:[{type:"command",command:$a},
+                           {type:"command",command:$b}]}]}}' >"$LEGACY/.claude/settings.json"
+  ( cd "$LEGACY" && "$SPACED2/bin/kibitz" "$op" project ) >/dev/null 2>&1
+  bare=$(jq -r --arg c "$SPACED2/bin/advisor hook Stop" \
+    '[.hooks.Stop[]?.hooks[]?.command] | map(select(. == $c)) | length' \
+    "$LEGACY/.claude/settings.json" 2>/dev/null)
+  appended=$(jq -r --arg c "$SPACED2/bin/advisor hook Stop; mine" \
+    '[.hooks.Stop[]?.hooks[]?.command] | map(select(. == $c)) | length' \
+    "$LEGACY/.claude/settings.json" 2>/dev/null)
+  check "$op clears a pre-rename spaced legacy hook" '[ "${bare:-1}" = "0" ]' \
+    "$(jq -c '.hooks' "$LEGACY/.claude/settings.json" 2>/dev/null)"
+  check "$op keeps a user command appended to the pre-rename one" '[ "${appended:-0}" = "1" ]'
+done
+
 # ...but a legacy spaced hook left by a checkout that has since MOVED is not.
 # Deliberate: the generic rule cannot tell where an unquoted spaced path ends,
 # and guessing means deleting commands users wrote. Documented limit, not a bug.

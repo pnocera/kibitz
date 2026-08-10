@@ -123,7 +123,12 @@ epoch_of() { local st; st="$(read_state "$1")"; printf '%s' "${st#* }"; }
 # require the remainder to be a bare event token -- a prefix match alone would
 # delete `<home>/bin/kibitz hook Stop; something-else`, which is a command the
 # user wrote, and that is exactly what the strict generic rule exists to avoid.
-ours_exact() { printf '%s/bin/kibitz hook ' "$ADVISOR_HOME"; }
+#
+# Both binary names, because the pre-rename era and the unquoted era overlap: a
+# spaced checkout from back then registered `<home>/bin/advisor hook X`, which
+# the space-free generic rule cannot reach either.
+ours_exact()        { printf '%s/bin/kibitz hook ' "$ADVISOR_HOME"; }
+ours_exact_legacy() { printf '%s/bin/advisor hook ' "$ADVISOR_HOME"; }
 
 is_enabled() { local st; st="$(read_state "$1")"; [ "${st%% *}" = "1" ]; }
 is_quiet()   { [ -f "$(proj_dir "$1")/quiet" ]; }
@@ -723,7 +728,7 @@ EOM
   fi
   cp "$target" "$target.kibitz-backup"
   merged="$(jq -s --arg adv "$ADVISOR_HOME/bin/kibitz" --arg ours "$OURS_RE" \
-             --arg mine "$(ours_exact)" '
+             --arg mine "$(ours_exact)" --arg mineold "$(ours_exact_legacy)" '
       (.[1] | walk(if type == "string" then sub("__KIBITZ__"; $adv) else . end)) as $new
       | .[0] as $cur
       | $cur * {hooks: (
@@ -736,8 +741,10 @@ EOM
                        # sit alongside ours.
                        | map(.hooks = ((.hooks // [])
                                        | map(select(((.command // "") | test($ours)) or
-                                                    ((.command // "") | startswith($mine) and
-                       (.[($mine|length):] | test("^[A-Za-z]+$")))
+                                                    ((.command // "") | (startswith($mine) and
+                        (.[($mine|length):] | test("^[A-Za-z]+$"))) or
+                       (startswith($mineold) and
+                        (.[($mineold|length):] | test("^[A-Za-z]+$"))))
                                                     | not))))
                        | map(select((.hooks | length) > 0))
                        + $new.hooks[$k]))
@@ -802,12 +809,15 @@ cmd_uninstall() {
   # filter to null and error out, and creating an empty hooks key to avoid that
   # would mean writing to a file that had nothing for us to clean.
   if ! jq --arg ours "$OURS_RE" --arg mine "$(ours_exact)" \
+       --arg mineold "$(ours_exact_legacy)" \
        'if has("hooks") | not then . else .hooks |= (
         with_entries(.value |= (
           map(.hooks = ((.hooks // [])
                         | map(select(((.command // "") | test($ours)) or
-                                     ((.command // "") | startswith($mine) and
-                       (.[($mine|length):] | test("^[A-Za-z]+$")))
+                                     ((.command // "") | (startswith($mine) and
+                        (.[($mine|length):] | test("^[A-Za-z]+$"))) or
+                       (startswith($mineold) and
+                        (.[($mineold|length):] | test("^[A-Za-z]+$"))))
                                      | not))))
           | map(select((.hooks | length) > 0))))
         | with_entries(select(.value | length > 0))) end' "$target" >"$target.tmp" 2>/dev/null; then
