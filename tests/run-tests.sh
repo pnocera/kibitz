@@ -570,6 +570,22 @@ echo "the executable name"
 check "the shipped executable is not named kibitz" '[ ! -e "$PLUG/bin/kibitz" ]' \
   "$(ls "$PLUG/bin")"
 check "it is named kibitzer and is runnable" '[ -x "$PLUG/bin/kibitzer" ]'
+
+# `link` is the escape hatch when the plugin bin/ is shadowed, so it has to
+# create the command it says it creates. A blind rename previously made it write
+# $dir/kibitzerer while reporting $dir/kibitzer, and nothing noticed.
+LINKD="$WORK/linkbin"
+( "$PLUG/bin/kibitzer" link "$LINKD" ) >"$WORK/link.out" 2>&1
+check "link creates exactly the command it reports" \
+  '[ -L "$LINKD/kibitzer" ] && [ "$(find "$LINKD" -mindepth 1 | wc -l)" = "1" ]' \
+  "$(ls -a "$LINKD" 2>/dev/null); $(cat "$WORK/link.out")"
+check "the link resolves to the real executable" \
+  '[ "$(readlink -f "$LINKD/kibitzer")" = "$(readlink -f "$PLUG/bin/kibitzer")" ]'
+check "link refuses to clobber a foreign command of the same name" \
+  'rm -f "$LINKD/kibitzer"; printf "#!/bin/sh\necho theirs\n" >"$LINKD/kibitzer";
+   chmod +x "$LINKD/kibitzer";
+   ! "$PLUG/bin/kibitzer" link "$LINKD" >/dev/null 2>&1 &&
+   grep >/dev/null theirs "$LINKD/kibitzer"'
 # Scoped to our own path shape: the docs legitimately mention /usr/bin/kibitz
 # when explaining why the executable is not called that.
 check "no config or doc invokes a bin/kibitz we no longer ship" \

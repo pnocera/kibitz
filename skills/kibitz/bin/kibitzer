@@ -750,8 +750,8 @@ cmd_link() {
   local dir="${1:-$HOME/.local/bin}"
   mkdir -p "$dir" || { echo "kibitzer: cannot create $dir" >&2; return 1; }
   # Writing into a command directory: never clobber something that is not ours.
-  if [ -e "$dir/kibitzerer" ] || [ -L "$dir/kibitzerer" ]; then
-    local cur; cur="$(readlink -f "$dir/kibitzerer" 2>/dev/null)"
+  if [ -e "$dir/kibitzer" ] || [ -L "$dir/kibitzer" ]; then
+    local cur; cur="$(readlink -f "$dir/kibitzer" 2>/dev/null)"
     if [ "$cur" != "$(readlink -f "$ADVISOR_HOME/bin/kibitzer")" ] && [ "${2:-}" != "--force" ]; then
       echo "kibitzer: $dir/kibitzer already exists and is not this kibitzer" >&2
       echo "  it points at: ${cur:-<unreadable>}" >&2
@@ -759,7 +759,7 @@ cmd_link() {
       return 1
     fi
   fi
-  ln -sfn "$ADVISOR_HOME/bin/kibitzer" "$dir/kibitzerer" ||
+  ln -sfn "$ADVISOR_HOME/bin/kibitzer" "$dir/kibitzer" ||
     { echo "kibitzer: cannot link into $dir" >&2; return 1; }
   echo "kibitzer: linked $dir/kibitzer -> $ADVISOR_HOME/bin/kibitzer"
   case ":$PATH:" in

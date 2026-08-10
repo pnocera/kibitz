@@ -32,7 +32,7 @@ trap 'rm -rf "$CFG" "$STATE" "$PROJ"' EXIT
 cp -r "$PLUG" "$CFG/skills/kibitz"
 [ -f "$CFG/skills/kibitz/.claude-plugin/plugin.json" ] || { echo "smoke: manifest missing"; exit 1; }
 
-ADVISOR_STATE_ROOT="$STATE" "$CFG/skills/kibitz/bin/kibitz" on "$PROJ" >/dev/null
+ADVISOR_STATE_ROOT="$STATE" "$CFG/skills/kibitz/bin/kibitzer" on "$PROJ" >/dev/null
 H="$(printf '%s' "$PROJ" | cksum | tr -d ' ' | cut -c1-12)"
 
 echo "smoke: starting a headless session (this takes a minute)…"
@@ -52,6 +52,6 @@ The plugin loaded its skill but not its hooks, or did not load at all. Check:
   - $CFG/skills/kibitz/.claude-plugin/plugin.json exists and validates
     (claude plugin validate "$CFG/skills/kibitz")
   - hooks/hooks.json is at the plugin root, not inside .claude-plugin/
-  - each command starts with "\${CLAUDE_PLUGIN_ROOT}"/bin/kibitz
+  - each command starts with "\${CLAUDE_PLUGIN_ROOT}"/bin/kibitzer
 EOF
 exit 1
