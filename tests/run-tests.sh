@@ -585,10 +585,26 @@ check "help names the command link actually creates" \
   '"$PLUG/bin/kibitzer" | grep >/dev/null "put a .kibitzer. command"' \
   "$("$PLUG/bin/kibitzer" | grep link)"
 # Same drift, different file: the docs have named the colliding command three
-# times now. Check them the way the help text is checked.
-DOCS="$HERE/../README.md $PLUG/SKILL.md"
-staledoc=$(grep -nE '`kibitz (on|off|status|log|tail|pane|install|uninstall|link|doctor|stats|mute|lint|quiet|advise-now)' \
-             $DOCS 2>/dev/null || true)
+# times now. Derive the subcommand list from the help output rather than
+# hardcoding it -- a hardcoded list is how `statusline` was missed -- and keep
+# the paths in a quoted array so a checkout under a spaced path still scans.
+mapfile -t SUBCMDS < <("$PLUG/bin/kibitzer" | sed -n 's/^  kibitzer \([a-z-]*\).*/\1/p' | sort -u)
+check "the help output actually lists subcommands to check" '[ "${#SUBCMDS[@]}" -ge 10 ]' \
+  "${SUBCMDS[*]:-none}"
+# SUBCMDS is derived from help, so a command wired into the dispatcher but never
+# documented would escape the scan entirely. Compare the two lists directly.
+mapfile -t DISPATCH < <(sed -n 's/^  \([a-z-]*\))  *shift; cmd_.*/\1/p' "$PLUG/bin/kibitzer" | sort -u)
+missing=""
+for c in "${DISPATCH[@]}"; do
+  case " ${SUBCMDS[*]} " in *" $c "*) ;; *) missing="$missing $c" ;; esac
+done
+check "every dispatcher subcommand appears in the help output" '[ -z "$missing" ]' \
+  "undocumented:$missing"
+DOCS=("$HERE/../README.md" "$PLUG/SKILL.md")
+SUBRE="$(IFS='|'; printf '%s' "${SUBCMDS[*]}")"
+# grep exit 1 is "no match" (good); 2 is an error and must not read as a pass.
+staledoc="$(grep -nE "\`kibitz ($SUBRE)" "${DOCS[@]}")"; grc=$?
+check "the doc scan ran without error" '[ "$grc" -le 1 ]' "grep exited $grc"
 check "no doc instructs a bare kibitz subcommand" '[ -z "$staledoc" ]' "$staledoc"
 
 check "no help line tells the user to run a bare kibitz" \
@@ -607,6 +623,18 @@ check "link refuses to clobber a foreign command of the same name" \
 check "no config or doc invokes a bin/kibitz we no longer ship" \
   '! grep -rnE "(skills/kibitz|PLUGIN_ROOT.)/bin/kibitz[^e]" \
       "$PLUG/hooks" "$PLUG/install" "$PLUG/SKILL.md" >/dev/null'
+
+# The README shows the by-path invocation, which is the form a user copies when
+# the command is shadowed -- exactly the regression this rename is about. One
+# mention is intentional: the sentence telling people to delete old
+# `/bin/kibitz hook` entries. Anything else is drift.
+# Exclude by OCCURRENCE, not by line: a line-based `grep -v` would let a line
+# that both mentions removing `/bin/kibitz hook` entries and shows
+# `/bin/kibitz on` slip through whole.
+stalepath="$(grep -oE 'skills/kibitz/bin/kibitz([^e]|$)[a-z]*' "$HERE/../README.md" \
+             | grep -v '^skills/kibitz/bin/kibitz hook' || true)"
+check "the README never shows a by-path bin/kibitz invocation" \
+  '[ -z "$stalepath" ]' "$stalepath"
 
 echo
 echo "install through a symlink  (found by the advisor, on itself)"
