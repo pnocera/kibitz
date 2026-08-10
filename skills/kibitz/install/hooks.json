@@ -1,25 +1,81 @@
 {
   "hooks": {
     "PreToolUse": [
-      { "hooks": [ { "type": "command", "command": "__KIBITZ__ hook PreToolUse", "timeout": 2 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"__KIBITZ__\" hook PreToolUse",
+            "timeout": 2
+          }
+        ]
+      }
     ],
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "__KIBITZ__ hook UserPromptSubmit", "timeout": 2 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"__KIBITZ__\" hook UserPromptSubmit",
+            "timeout": 2
+          }
+        ]
+      }
     ],
     "PostToolUse": [
-      { "hooks": [ { "type": "command", "command": "__KIBITZ__ hook PostToolUse", "timeout": 2 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"__KIBITZ__\" hook PostToolUse",
+            "timeout": 2
+          }
+        ]
+      }
     ],
     "PostToolUseFailure": [
-      { "hooks": [ { "type": "command", "command": "__KIBITZ__ hook PostToolUseFailure", "timeout": 2 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"__KIBITZ__\" hook PostToolUseFailure",
+            "timeout": 2
+          }
+        ]
+      }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "__KIBITZ__ hook Stop", "timeout": 2 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"__KIBITZ__\" hook Stop",
+            "timeout": 2
+          }
+        ]
+      }
     ],
     "SubagentStop": [
-      { "hooks": [ { "type": "command", "command": "__KIBITZ__ hook SubagentStop", "timeout": 2 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"__KIBITZ__\" hook SubagentStop",
+            "timeout": 2
+          }
+        ]
+      }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "__KIBITZ__ hook SessionEnd", "timeout": 2 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"__KIBITZ__\" hook SessionEnd",
+            "timeout": 2
+          }
+        ]
+      }
     ]
   }
 }

@@ -515,14 +515,45 @@ check "the legacy settings.json template is out of the plugin hook path" \
   '[ -f "$PLUG/install/hooks.json" ] && [ ! -f "$PLUG/hooks.json" ]'
 
 # A user hook that merely mentions our command must not be treated as ours.
+# A checkout whose path contains spaces must produce a hook that can actually
+# run, and that we can still recognise as ours later. Quoting the executable is
+# what makes it runnable; the ownership regex has to accept that quoted form or
+# uninstall silently leaves it behind.
+SPACED="$WORK/dir with space"; mkdir -p "$SPACED"
+cp -r "$PLUG" "$SPACED/kibitz"
+SPROJ="$WORK/spaceproj"; mkdir -p "$SPROJ/.claude"
+( cd "$SPROJ" && "$SPACED/kibitz/bin/kibitz" install project ) >/dev/null 2>&1
+scmd=$(jq -r '.hooks.Stop[]?.hooks[]?.command' "$SPROJ/.claude/settings.json" 2>/dev/null)
+check "a checkout path with spaces yields a quoted, runnable command" \
+  '[ "${scmd:0:1}" = "\"" ]' "$scmd"
+check "and the quoted executable actually exists" \
+  'eval "[ -x ${scmd% hook Stop} ]"' "$scmd"
+( cd "$SPROJ" && "$SPACED/kibitz/bin/kibitz" uninstall project ) >/dev/null 2>&1
+check "uninstall removes the quoted spaced-path hook" \
+  '[ -z "$(jq -r ".hooks.Stop[]?.hooks[]?.command // empty" "$SPROJ/.claude/settings.json" 2>/dev/null)" ]' \
+  "$(jq -c '.hooks' "$SPROJ/.claude/settings.json" 2>/dev/null)"
+
+# A command that merely contains our path is not ours. The unquoted forms are
+# the dangerous ones: an earlier "anchored" regex still matched them, and the
+# regression missed it by only testing the quoted shape, which never matched.
 MIXDIR="$WORK/anchor"; mkdir -p "$MIXDIR/.claude"
-cat >"$MIXDIR/.claude/settings.json" <<ANCHOR
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"logger '/bin/kibitz hook Stop'"}]}]}}
-ANCHOR
-( cd "$MIXDIR" && "$PLUG/bin/kibitz" uninstall project ) >/dev/null 2>&1
-check "a user command that merely mentions ours is not deleted" \
-  'grep "logger" "$MIXDIR/.claude/settings.json" >/dev/null' \
-  "$(cat "$MIXDIR/.claude/settings.json")"
+i=0
+for foreign in "logger /bin/kibitz hook Stop" \
+               "env X=1 /bin/kibitz hook Stop" \
+               "echo foo/bin/kibitz hook Stop" \
+               "logger '/bin/advisor hook Stop'"; do
+  i=$((i+1))
+  for op in install uninstall; do
+    jq -n --arg c "$foreign" \
+      '{hooks:{Stop:[{hooks:[{type:"command",command:$c}]}]}}' >"$MIXDIR/.claude/settings.json"
+    ( cd "$MIXDIR" && "$PLUG/bin/kibitz" "$op" project ) >/dev/null 2>&1
+    surv=$(jq -r --arg c "$foreign" \
+      '[.hooks.Stop[]?.hooks[]?.command] | map(select(. == $c)) | length' \
+      "$MIXDIR/.claude/settings.json" 2>/dev/null)
+    check "$op keeps a foreign command #$i that merely contains our path" \
+      '[ "$surv" = "1" ]' "$foreign -> $(jq -c '.hooks' "$MIXDIR/.claude/settings.json" 2>/dev/null)"
+  done
+done
 
 echo
 echo "install through a symlink  (found by the advisor, on itself)"

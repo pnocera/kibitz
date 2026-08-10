@@ -148,13 +148,18 @@ shell.
 bash tests/run-tests.sh
 ```
 
-104 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+117 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
 reading, invocation confinement, the plugin package (manifest, hook events, relocatable
 `${CLAUDE_PLUGIN_ROOT}` paths), install/uninstall merge safety including hooks nested beside yours,
 upgrade from the two-file state layout, epoch boundaries across off/on, mute at both publication and
 delivery, and hot-path latency.
+
+`tests/smoke-plugin.sh` is separate and opt-in: it installs into the real layout, starts a headless
+Claude Code, and asserts a hook actually fired. It needs an authenticated CLI and a couple of
+minutes, so CI cannot run it — but the JSON-shape tests never cross the loader boundary, and this
+package has already shipped one install that validated perfectly and loaded nothing.
 
 The concurrency and confinement tests were each verified to **fail** against the pre-fix code. A
 test that passes either way is worth nothing — if you change the locking, the fingerprint, the

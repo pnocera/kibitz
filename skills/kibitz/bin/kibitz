@@ -137,7 +137,20 @@ MIN_INTERVAL="${ADVISOR_MIN_INTERVAL:-45}"
 # Matches hooks this tool installed, including those written under its former
 # name. Without the legacy alternative, upgrading leaves dead `advisor hook`
 # commands registered alongside the new ones.
-OURS_RE="^\"?[^\"]*/bin/(kibitz|advisor)\"? hook [A-Za-z]+$"
+# Ownership must be exact. We only ever write two shapes: the plugin form
+# "${CLAUDE_PLUGIN_ROOT}"/bin/kibitz hook <Event>, and the installer's
+# absolute path. Anything with a leading word -- `logger /bin/kibitz hook Stop`,
+# `env X=1 /bin/...` -- is somebody else's command and must survive both
+# install and uninstall. (kibitz|advisor) covers the pre-rename binary, and
+# the quoted absolute form covers a checkout whose path contains spaces.
+#
+# Deliberately path-agnostic: a kibitz hook pointing at *any* path is ours, not
+# just this checkout's. That is what makes an upgrade replace the old command
+# instead of registering a second one -- a moved, renamed, or plugin-vs-manual
+# install would otherwise leave two hooks on every event, one of them dead.
+# The cost is that a second, independent kibitz install is also displaced. That
+# is the intended trade: two kibitz hooks on one event is never what you want.
+OURS_RE='^("\$\{CLAUDE_PLUGIN_ROOT\}"/bin/(kibitz|advisor)|"/[^"]*/bin/(kibitz|advisor)"|/[^ "]*/bin/(kibitz|advisor)) hook [A-Za-z]+$'
 
 init_sess() {
   local d; d="$(sess_dir "$1" "$2")"
