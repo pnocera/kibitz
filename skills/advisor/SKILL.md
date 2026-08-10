@@ -10,7 +10,8 @@ turn endings, reads the working tree, and offers whatever it thinks is worth say
 are injected into the conversation at the next tool call, and always written to a durable log the
 operator can watch.
 
-Run `advisor` from the skill directory (`./bin/advisor`), or wherever it is installed.
+`npx skills add` does not put `advisor` on the PATH. Use the installed script directly
+(`./.agents/skills/advisor/bin/advisor`) or run `advisor link` once to get a shim in `~/.local/bin`.
 
 ## Controls
 
@@ -22,6 +23,9 @@ Run `advisor` from the skill directory (`./bin/advisor`), or wherever it is inst
 | "advisor status" | `advisor status` |
 | "what has the advisor said" | `advisor log` |
 | "show me the advisor live" | `advisor pane` — Herdr side pane following the log |
+| "what should I do next / ask it now" | `advisor advise-now` |
+| "stop telling me about X" | `advisor mute "X"` (`mute list`, `mute clear`) |
+| "is it saying anything useful" | `advisor stats` — counts by the kind Codex chose |
 
 Default is **off**. Opt-in per project directory, so `on` here does not enable it elsewhere.
 

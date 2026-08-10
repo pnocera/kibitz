@@ -1,7 +1,9 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["advisories"],
+  "required": [
+    "advisories"
+  ],
   "properties": {
     "advisories": {
       "type": "array",
@@ -9,8 +11,18 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["note", "why_it_matters", "evidence", "confidence"],
+        "required": [
+          "kind",
+          "note",
+          "why_it_matters",
+          "evidence",
+          "confidence"
+        ],
         "properties": {
+          "kind": {
+            "type": "string",
+            "description": "A word or two, in your own words, for what sort of remark this is. There is no fixed vocabulary and no severity scale \u2014 describe it however fits."
+          },
           "note": {
             "type": "string",
             "description": "The remark itself, in one or two sentences."
@@ -21,7 +33,7 @@
           },
           "evidence": {
             "type": "string",
-            "description": "A concrete anchor if you have one: file:line, a command, an observed output. Empty string if not applicable."
+            "description": "A concrete anchor if one applies: file:line, a command, an observed output. Empty string when the remark is a suggestion rather than a claim about existing code."
           },
           "confidence": {
             "type": "number",

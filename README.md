@@ -53,6 +53,9 @@ advisor log [cwd] [n]            what has been said
 advisor tail [cwd]               follow it live
 advisor pane [cwd]               Herdr side pane following the log
 advisor statusline [cwd]         pending-count segment for your status line
+advisor advise-now [cwd]         ask for a contribution now, without waiting
+advisor mute <text>|list|clear   stop hearing about a topic
+advisor stats [cwd]              what kinds of things it has been saying
 advisor lint <file>              fail if a file reads like a review gate
 ```
 
@@ -70,7 +73,10 @@ tool calls since the last cycle, and `git diff`. It reads the repository itself;
 pointer, not a source.
 
 **What it is told.** As little as possible. The prompt gives Codex the situation and one open
-question — no checklist, no categories, no severity rubric. Unguided reviewers find the things a
+question — no checklist, no categories, no severity rubric. It does say explicitly that the range is
+wider than fault-finding: a simpler approach, an unexamined assumption, something worth preserving.
+Each advisory carries a free-text `kind` in Codex's own words, and `advisor stats` counts them, so
+whether the constructive half actually materialises is measured rather than assumed. Unguided reviewers find the things a
 checklist would never list; a checklist turns the reviewer into a checklist executor. The output
 schema has no `severity` and no `verdict` field, deliberately: a severity enum is a review rubric
 wearing a JSON hat.
@@ -88,11 +94,24 @@ with `setsid`. A hook that waited on Codex would freeze the session.
 turn can issue parallel tool calls, so several producers write at once. A shared append-only file
 would interleave.
 
-**Delivery is deliberately asymmetric.** `events/` (hook → worker) is at-least-once. `outbox/`
-(worker → Claude) is *best effort*, because Claude never acknowledges receiving injected context.
-The delivery ledger is written and flushed *before* the emit, so a crash loses an advisory rather
-than duplicating one. **The advisor promises you a complete log and promises Claude nothing** —
-which is safe precisely because nothing depends on Claude receiving any particular advisory.
+**Delivery is deliberately asymmetric.** `outbox/` (worker → Claude) is *best effort*, because
+Claude never acknowledges receiving injected context. The delivery ledger is written and flushed
+*before* the emit, so a crash loses an advisory rather than duplicating one. **The advisor promises
+you a complete log and promises Claude nothing** — which is safe precisely because nothing depends
+on Claude receiving any particular advisory.
+
+**Opt-out is an epoch, not a lock.** `enabled` and an epoch counter live in one file, replaced
+atomically; `off` advances the epoch, every record carries the epoch it was born in, and consumers
+ignore older ones. Locks were tried first and were the wrong tool: producers, the worker and the
+drain are separate processes, and an exclusive lock across them serialised producers, dropped events
+under contention, leaked a descriptor through `setsid` into a detached child, and wedged delivery
+silently for as long as any holder lived. An epoch has none of those failure modes — a late writer
+is harmless because its output is already inert.
+
+The honest residual: `off` and a drain already past its final check are not perfectly linearizable.
+The window is a single stat, an advisory already being rendered may still land, and it blocks
+nothing. Closing it completely would mean reintroducing the critical section that caused a total
+delivery outage.
 
 **Every cycle is a fresh, confined invocation:** `codex exec --sandbox read-only --cd <cwd>`.
 Do **not** switch to `codex exec resume` — it accepts neither flag on 0.147.0, so it cannot hold the
@@ -109,10 +128,11 @@ shell.
 bash tests/run-tests.sh
 ```
 
-69 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+82 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
-reading, invocation confinement, install/uninstall merge safety, and hot-path latency.
+reading, invocation confinement, install/uninstall merge safety, epoch boundaries across off/on, mute at both
+publication and delivery, and hot-path latency.
 
 The concurrency and confinement tests were each verified to **fail** against the pre-fix code. A
 test that passes either way is worth nothing — if you change the locking, the fingerprint, the

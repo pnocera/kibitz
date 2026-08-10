@@ -28,11 +28,33 @@ pdir() {
   printf '%s/projects/%s' "$ADVISOR_STATE_ROOT" "$h"
 }
 
-plant() { # plant an advisory directly in the outbox
+epoch() { cut -d' ' -f2 "$(pdir)/state" 2>/dev/null || echo 0; }
+
+plant() { # plant an advisory directly in the outbox, in the current epoch
   mkdir -p "$(sdir)/outbox"
-  jq -cn --arg id "$1" --arg n "$2" \
-    '{id:$id, note:$n, why_it_matters:"because", evidence:"", confidence:0.9}' \
+  jq -cn --arg id "$1" --arg n "$2" --argjson ep "$(epoch)" \
+    '{id:$id, epoch:$ep, kind:"", note:$n, why_it_matters:"because", evidence:"", confidence:0.9}' \
     >"$(sdir)/outbox/1-$1.json"
+}
+
+plant_stale() { # a record from a previous epoch
+  mkdir -p "$(sdir)/outbox"
+  jq -cn --arg id "$1" --arg n "$2" --argjson ep "$(( $(epoch) - 1 ))" \
+    '{id:$id, epoch:$ep, kind:"", note:$n, why_it_matters:"because", evidence:"", confidence:0.9}' \
+    >"$(sdir)/outbox/0-$1.json"
+}
+
+# A worker exits immediately if another cycle holds cycle.lock. Earlier sections
+# spawn workers, so a later direct invocation must wait for the lock to clear or
+# it silently does nothing and fails a whole cluster of unrelated assertions.
+wait_idle() {
+  local i
+  for i in $(seq 1 200); do
+    ( exec 5>"$(sdir)/cycle.lock" 2>/dev/null; flock -n 5 ) 2>/dev/null && return 0
+    sleep 0.05
+  done
+  echo "        (warning: cycle.lock still held after 10s)" >&2
+  return 1
 }
 
 echo
@@ -45,7 +67,7 @@ check "default-off: no state directory is created while disabled" \
   '[ ! -d "$(sdir)" ]' "state created without opt-in"
 
 "$ADV" on "$WORK" >/dev/null
-check "on: enabled flag is set" '[ -f "$(pdir)/enabled" ]'
+check "on: state records enabled" '[ "$(cut -d" " -f1 "$(pdir)/state")" = "1" ]'
 
 fire UserPromptSubmit >/dev/null
 check "on: session state is initialised by the first hook" '[ -d "$(sdir)/outbox" ]'
@@ -138,13 +160,16 @@ rm -f "$(sdir)/worker.pid"
 NOSPAWN="$WORK/nospawn"; mkdir -p "$NOSPAWN"
 printf '#!/usr/bin/env bash\nsleep 5\n' >"$NOSPAWN/codex"; chmod +x "$NOSPAWN/codex"
 date +%s >"$(sdir)/last-cycle"
-PATH="$NOSPAWN:$PATH" toolhook PostToolUse Edit >/dev/null; sleep 0.4
+# Assert the spawn DECISION, not a racing read of process state: maybe_spawn
+# rewrites last-cycle exactly when it decides to run one.
+BEFORE=$(cat "$(sdir)/last-cycle")
+PATH="$NOSPAWN:$PATH" toolhook PostToolUse Edit >/dev/null
 check "ordinary activity is debounced, no cycle spawned" \
-  '! "$ADV" status "$WORK" | grep -q "codex   : running"'
-PATH="$NOSPAWN:$PATH" toolhook PostToolUseFailure Bash "boom" >/dev/null; sleep 0.6
+  '[ "$(cat "$(sdir)/last-cycle")" = "$BEFORE" ]' "a cycle was started inside the debounce window"
+sleep 1
+PATH="$NOSPAWN:$PATH" toolhook PostToolUseFailure Bash "boom" >/dev/null
 check "a failed tool call bypasses the debounce and spawns immediately" \
-  '"$ADV" status "$WORK" | grep -q "codex   : running"' \
-  "$("$ADV" status "$WORK" | sed -n "4,8p")"
+  '[ "$(cat "$(sdir)/last-cycle")" != "$BEFORE" ]' "a failure did not trigger a cycle"
 "$ADV" off "$WORK" >/dev/null
 # Wait for the stalled cycle to actually go, rather than guessing at a sleep:
 # it holds cycle.lock, and the next test needs to acquire it.
@@ -176,6 +201,7 @@ exit 0
 FAKE
 chmod +x "$CAPBIN/codex"
 export PROMPTCAP="$WORK/prompt.txt"
+wait_idle
 PATH="$CAPBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "the worker feeds tap events into the prompt" \
   'grep -q "Tool calls since you last looked" "$PROMPTCAP" && grep -q "Edit" "$PROMPTCAP"'
@@ -199,7 +225,7 @@ echo "off"
 
 plant id-eee "pending when off is pressed"
 "$ADV" off "$WORK" >/dev/null
-check "off: enabled flag is cleared" '[ ! -f "$(pdir)/enabled" ]'
+check "off: state records disabled" '[ "$(cut -d" " -f1 "$(pdir)/state")" = "0" ]'
 check "off: pending advisories are cleared, not left to leak later" \
   '[ -z "$(find "$(sdir)/outbox" -name "*.json" 2>/dev/null)" ]'
 check "no-advice-after-off: hooks emit nothing" '[ -z "$(fire PreToolUse)" ]'
@@ -211,9 +237,13 @@ printf '#!/usr/bin/env bash\nsleep 30\n' >"$STALLBIN/codex"; chmod +x "$STALLBIN
 "$ADV" on "$WORK" >/dev/null
 PATH="$STALLBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1 &
 WPID=$!
-sleep 0.5
+# Wait for the worker to be reapable rather than guessing at a sleep: it writes
+# its pidfile only after taking the cycle lock, and under load that can take
+# longer than any fixed delay. `off` cannot reap what has not identified itself.
+for _ in $(seq 1 100); do [ -s "$(sdir)/worker.pid" ] && break; sleep 0.05; done
+check "the worker identified itself before off" '[ -s "$(sdir)/worker.pid" ]'
 "$ADV" off "$WORK" >/dev/null
-sleep 0.3
+for _ in $(seq 1 60); do kill -0 "$WPID" 2>/dev/null || break; sleep 0.05; done
 check "immediate-off: a genuine in-flight worker is reaped" \
   '! kill -0 "$WPID" 2>/dev/null' "worker survived off"
 wait "$WPID" 2>/dev/null
@@ -255,8 +285,9 @@ sleep 0.2                            # off has cleared the flag but may still be
 check "disabling takes effect immediately even while off waits on a publication" \
   '[ -z "$(fire PreToolUse)" ]' "advice was still injected after off began"
 wait "$OFFPID" 2>/dev/null; wait "$WPID" 2>/dev/null
-check "off still cleans up everything the stalled worker published" \
-  '[ -z "$(find "$(sdir)/outbox" -name "*.json" 2>/dev/null)" ]'
+"$ADV" on "$WORK" >/dev/null
+check "nothing the stalled worker published survives into the next epoch" \
+  '[ -z "$(fire PreToolUse)" ]' "a pre-off advisory was delivered after re-enabling"
 
 echo
 echo "off races a completing worker  (found by the advisor, on itself)"
@@ -294,10 +325,11 @@ sleep 0.2                       # codex has returned; worker is mid-publication
 "$ADV" off "$WORK" >/dev/null
 wait "$WPID" 2>/dev/null
 
-check "no advisory survives an off that races publication" \
-  '[ -z "$(find "$(sdir)/outbox" "$(sdir)/outbox-processing" -name "*.json" 2>/dev/null)" ]' \
-  "a record was published after off cleared the outbox"
-check "no-advice-after-off holds after the race" '[ -z "$(fire PreToolUse)" ]'
+check "no-advice-after-off holds when off races publication" \
+  '[ -z "$(fire PreToolUse)" ]' "a record published during off was delivered"
+"$ADV" on "$WORK" >/dev/null
+check "and it stays undelivered after re-enabling" \
+  '[ -z "$(fire PreToolUse)" ]' "a pre-off record was resurrected by re-enabling"
 
 echo
 echo "drain races off  (found by the advisor, on itself)"
@@ -314,23 +346,28 @@ RACEOUT="$WORK/drainrace.out"
 ( hookjson | ADVISOR_TEST_DRAIN_DELAY=0.6 "$ADV" hook PreToolUse >"$RACEOUT" 2>/dev/null ) &
 DPID=$!
 sleep 0.2
-rm -f "$(pdir)/enabled"           # off's first action, while the drain is in flight
+"$ADV" off "$WORK" >/dev/null    # lands while the drain is in flight
 wait "$DPID" 2>/dev/null
 check "a drain already past the outer check emits nothing once off lands" \
   '[ ! -s "$RACEOUT" ]' "advice escaped after the flag was cleared: $(cat "$RACEOUT" 2>/dev/null)"
-check "the record is not silently consumed either" \
-  '[ -n "$(find "$(sdir)/outbox" "$(sdir)/outbox-processing" -name "*.json" 2>/dev/null)" ]'
+# `off` clears the queue as housekeeping, so the record is legitimately gone.
+# What matters is that re-enabling cannot resurrect it.
+"$ADV" on "$WORK" >/dev/null
+check "and re-enabling does not resurrect it" \
+  '[ -z "$(fire PreToolUse)" ]' "a pre-off advisory was delivered after re-enabling"
 "$ADV" off "$WORK" >/dev/null; "$ADV" on "$WORK" >/dev/null
 
-# The drain must never block the hot path behind a publishing worker.
-exec 9>"$(pdir)/control.lock"; flock 9        # simulate a worker holding it
-plant id-locked "waiting behind a publication"
-t0=$(date +%s%N); out="$(fire PreToolUse)"; t1=$(date +%s%N)
-ms=$(( (t1 - t0) / 1000000 ))
-check "drain does not block when the control lock is held (${ms}ms)" '[ "$ms" -lt 300 ]' "${ms}ms"
-check "drain defers rather than emitting while the lock is held" '[ -z "$out" ]'
-flock -u 9; exec 9>&-
-check "the deferred advisory is delivered on the next call" '[ -n "$(fire PreToolUse)" ]'
+# Delivery is gated on the epoch, not on a lock, so nothing can wedge the hot
+# path: a stale record is dropped and a current one goes out in the same call.
+plant_stale id-stale "written before the operator opted out"
+plant id-fresh "written after"
+out="$(fire PreToolUse)"
+check "a record from an older epoch is never delivered" \
+  '! printf "%s" "$out" | grep -q "before the operator opted out"'
+check "a current record in the same drain is still delivered" \
+  'printf "%s" "$out" | grep -q "written after"'
+check "the stale record is not left lying around" \
+  '[ -z "$(find "$(sdir)/outbox" -name "0-id-stale.json" 2>/dev/null)" ]'
 
 echo
 echo "transcript is read bounded, not slurped  (found by the advisor, on itself)"
@@ -348,6 +385,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$NOOPBIN/codex"; chmod +x "$NOOPBIN/cod
 # Time it rather than counting syscalls: slurping a multi-MB transcript is
 # markedly slower than a bounded tail, and this stays portable.
 t0=$(date +%s%N)
+wait_idle
 PATH="$NOOPBIN:$PATH" ADVISOR_TRANSCRIPT_LINES=400 "$ADV" worker "$WORK" "$SID" "$BIGT" >/dev/null 2>&1
 t1=$(date +%s%N)
 check "a ${BYTES}-byte transcript is processed in bounded time ($(( (t1-t0)/1000000 ))ms)" \
@@ -374,6 +412,7 @@ JSON
 exit 0
 FAKE
 chmod +x "$UNIBIN/codex"
+wait_idle
 PATH="$UNIBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 n="$(find "$(sdir)/outbox" -name '*.json' 2>/dev/null | wc -l)"
 check "two distinct non-Latin advisories are not collapsed into one" \
@@ -381,6 +420,7 @@ check "two distinct non-Latin advisories are not collapsed into one" \
 
 # And identical notes still deduplicate.
 rm -f "$(sdir)/outbox"/*.json
+wait_idle
 PATH="$UNIBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "a repeated advisory is still suppressed" \
   '[ "$(find "$(sdir)/outbox" -name "*.json" 2>/dev/null | wc -l)" -eq 0 ]'
@@ -398,6 +438,7 @@ check "off clears the event queue, not just the outbox" '[ "$(evcount)" -eq 0 ]'
 "$ADV" on "$WORK" >/dev/null
 rm -f "$(sdir)/seen"; date +%s >"$(sdir)/last-cycle"
 : >"$PROMPTCAP"
+wait_idle
 PATH="$CAPBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "a cycle after off->on sees no pre-off activity" \
   '! grep -q "Edit" "$PROMPTCAP"' "$(grep -A3 "Tool calls" "$PROMPTCAP" 2>/dev/null | head -4)"
@@ -414,8 +455,13 @@ TPID=$!
 sleep 0.2
 "$ADV" off "$WORK" >/dev/null
 wait "$TPID" 2>/dev/null
-check "an in-flight tap hook publishes nothing once off lands" \
-  '[ "$(evcount)" -eq 0 ]' "a tap event was written after off cleared the queues"
+"$ADV" on "$WORK" >/dev/null
+rm -f "$(sdir)/seen"; date +%s >"$(sdir)/last-cycle"
+: >"$PROMPTCAP"
+wait_idle
+PATH="$CAPBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
+check "an event written by an in-flight tap hook after off is never used" \
+  '! grep -q "Edit" "$PROMPTCAP"' "pre-off activity reached the next cycle"
 
 echo
 echo "install through a symlink  (found by the advisor, on itself)"
@@ -452,6 +498,64 @@ check "uninstall removes only our hooks" \
    ! jq -r ".hooks | tostring" "$INSTDIR/.claude/settings.json" | grep -q "advisor hook"'
 
 echo
+echo "the constructive half"
+
+check "the prompt invites more than fault-finding" \
+  'grep -qi "wider than" "$HERE/../skills/advisor/lib/prompt.tmpl" &&
+   grep -qi "simpler way" "$HERE/../skills/advisor/lib/prompt.tmpl"'
+check "advisories carry a free-text kind" \
+  'jq -e ".properties.advisories.items.required | index(\"kind\")" "$HERE/../skills/advisor/lib/advice.schema.json" >/dev/null'
+check "kind is free text, not an enum" \
+  '! jq -e ".properties.advisories.items.properties.kind | has(\"enum\")" "$HERE/../skills/advisor/lib/advice.schema.json" >/dev/null'
+
+KINDBIN="$WORK/kindbin"; mkdir -p "$KINDBIN"
+cat >"$KINDBIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+[ -n "$out" ] && cat >"$out" <<'JSON'
+{"advisories":[
+ {"kind":"simpler approach","note":"the retry loop duplicates backoff already in util","why_it_matters":"one place to change","evidence":"","confidence":0.8},
+ {"kind":"worth preserving","note":"the read-only sandbox is load-bearing","why_it_matters":"easy to lose in a refactor","evidence":"bin/x:10","confidence":0.9}
+]}
+JSON
+exit 0
+FAKE
+chmod +x "$KINDBIN/codex"
+"$ADV" on "$WORK" >/dev/null; rm -f "$(sdir)/seen" "$(sdir)/kinds"
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+wait_idle
+PATH="$KINDBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
+check "a suggestion with no file evidence is still published" \
+  '[ "$(find "$(sdir)/outbox" -name "*.json" | wc -l)" -eq 2 ]'
+check "the operator log shows the kind" \
+  'grep -q "(simpler approach)" "$(sdir)/advice.log"'
+out="$(fire PreToolUse)"
+check "the injected block labels each advisory with its kind" \
+  'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep -q "\[simpler approach\]"'
+check "stats reports what kinds were offered" \
+  '"$ADV" stats "$WORK" | grep -q "worth preserving"'
+
+# mute
+"$ADV" mute "simpler approach" "$WORK" >/dev/null
+rm -f "$(sdir)/seen"; find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+wait_idle
+PATH="$KINDBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
+check "mute suppresses a matching advisory" \
+  '! find "$(sdir)/outbox" -name "*.json" | xargs -r cat | grep -q "simpler approach"'
+check "mute leaves everything else alone" \
+  'find "$(sdir)/outbox" -name "*.json" | xargs -r cat | grep -q "worth preserving"'
+check "mute list shows the pattern" '"$ADV" mute list "$WORK" | grep -q "simpler approach"'
+# A topic muted after an advisory is already queued must not still be delivered.
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+plant id-quiettopic "flaky test detector says hello"
+"$ADV" mute "flaky test detector" "$WORK" >/dev/null
+check "mute also suppresses an advisory already queued for delivery" \
+  '[ -z "$(fire PreToolUse)" ]' "a muted topic was delivered from the outbox"
+"$ADV" mute clear "$WORK" >/dev/null
+check "mute clear empties it" '"$ADV" mute list "$WORK" | grep -q "nothing muted"'
+
+echo
 echo "register (decision 7)"
 
 check "no gate language in the prompt sent to Codex" \
@@ -480,6 +584,7 @@ chmod +x "$FAKEBIN/codex"
 export CAPTURE="$WORK/capture.txt"; : >"$CAPTURE"
 
 "$ADV" on "$WORK" >/dev/null
+wait_idle
 PATH="$FAKEBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 
 check "worker actually invoked codex" '[ -s "$CAPTURE" ]'
@@ -498,6 +603,7 @@ check "worker wrote to the durable operator log" \
 # even when Claude is never given them.
 "$ADV" quiet on "$WORK" >/dev/null
 : >"$CAPTURE"; rm -f "$(sdir)/seen"
+wait_idle
 PATH="$FAKEBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "operator log records advisories even while injection is quiet" \
   '[ "$(grep -c "captured" "$(sdir)/advice.log")" -ge 2 ]'
