@@ -636,6 +636,10 @@ stalesrc="$(grep -nE '(echo|printf)[^#]*[^-a-zA-Z0-9_/]kibitz ('"$SUBRE"')' \
             "$PLUG/bin/kibitzer" || true)"
 check "no message anywhere in the source names a bare kibitz command" \
   '[ -z "$stalesrc" ]' "$stalesrc"
+# Whitespace-insensitive, so a label like `kibitz  <cwd>` cannot hide behind an
+# extra space: no printed line may begin with the shadowed name at all.
+badlabel="$(grep -nE "(echo|printf) +[\"']kibitz[^e]" "$PLUG/bin/kibitzer" || true)"
+check "no printed line starts with the shadowed name" '[ -z "$badlabel" ]' "$badlabel"
 
 check "no help line tells the user to run a bare kibitz" \
   '! "$PLUG/bin/kibitzer" | grep -E >/dev/null "^  kibitz( |$)|\`kibitz\`"' \
