@@ -119,7 +119,10 @@ write_state() { # $1 cwd, $2 enabled(0|1) -- always advances the epoch
 
 epoch_of() { local st; st="$(read_state "$1")"; printf '%s' "${st#* }"; }
 # Our own legacy (pre-quoting) registration, matched literally rather than by
-# pattern: unambiguous because we are the ones who wrote it.
+# pattern: unambiguous because we are the ones who wrote it. Callers must also
+# require the remainder to be a bare event token -- a prefix match alone would
+# delete `<home>/bin/kibitz hook Stop; something-else`, which is a command the
+# user wrote, and that is exactly what the strict generic rule exists to avoid.
 ours_exact() { printf '%s/bin/kibitz hook ' "$ADVISOR_HOME"; }
 
 is_enabled() { local st; st="$(read_state "$1")"; [ "${st%% *}" = "1" ]; }
@@ -733,7 +736,8 @@ EOM
                        # sit alongside ours.
                        | map(.hooks = ((.hooks // [])
                                        | map(select(((.command // "") | test($ours)) or
-                                                    ((.command // "") | startswith($mine))
+                                                    ((.command // "") | startswith($mine) and
+                       (.[($mine|length):] | test("^[A-Za-z]+$")))
                                                     | not))))
                        | map(select((.hooks | length) > 0))
                        + $new.hooks[$k]))
@@ -802,7 +806,8 @@ cmd_uninstall() {
         with_entries(.value |= (
           map(.hooks = ((.hooks // [])
                         | map(select(((.command // "") | test($ours)) or
-                                     ((.command // "") | startswith($mine))
+                                     ((.command // "") | startswith($mine) and
+                       (.[($mine|length):] | test("^[A-Za-z]+$")))
                                      | not))))
           | map(select((.hooks | length) > 0))))
         | with_entries(select(.value | length > 0))) end' "$target" >"$target.tmp" 2>/dev/null; then

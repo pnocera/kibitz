@@ -549,6 +549,21 @@ for op in install uninstall; do
     '[ "${left:-1}" = "0" ]' "$(jq -c '.hooks' "$LEGACY/.claude/settings.json" 2>/dev/null)"
 done
 
+# The provenance rule is a literal path match, so it needs the same exactness as
+# the generic one: a bare prefix would claim anything a user appended to it.
+jq -n --arg a "$SPACED2/bin/kibitz hook Stop; echo mine" \
+      --arg b "$SPACED2/bin/kibitz hook Stop --extra" \
+      --arg c "$SPACED2/bin/kibitz hook Stop" \
+  '{hooks:{Stop:[{hooks:[{type:"command",command:$a},
+                         {type:"command",command:$b},
+                         {type:"command",command:$c}]}]}}' >"$LEGACY/.claude/settings.json"
+( cd "$LEGACY" && "$SPACED2/bin/kibitz" uninstall project ) >/dev/null 2>&1
+surv=$(jq -r '[.hooks.Stop[]?.hooks[]?.command] | length' "$LEGACY/.claude/settings.json" 2>/dev/null)
+check "provenance matching keeps commands that only start with ours" \
+  '[ "${surv:-0}" = "2" ]' "$(jq -r '.hooks.Stop[]?.hooks[]?.command // empty' "$LEGACY/.claude/settings.json" 2>/dev/null)"
+check "and still removes the bare legacy command itself" \
+  '! jq -r ".hooks.Stop[]?.hooks[]?.command // empty" "$LEGACY/.claude/settings.json" | grep >/dev/null -x "$SPACED2/bin/kibitz hook Stop"'
+
 # ...but a legacy spaced hook left by a checkout that has since MOVED is not.
 # Deliberate: the generic rule cannot tell where an unquoted spaced path ends,
 # and guessing means deleting commands users wrote. Documented limit, not a bug.
