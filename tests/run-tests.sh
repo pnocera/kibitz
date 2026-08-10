@@ -617,8 +617,9 @@ staledoc="$(grep -nE "(^|[^-a-zA-Z0-9_/])kibitz ($SUBRE)([^a-zA-Z0-9-]|\$)" "${D
 check "the doc scan ran without error" '[ "$grc" -le 1 ]' "grep exited $grc"
 check "no doc instructs a bare kibitz subcommand" '[ -z "$staledoc" ]' "$staledoc"
 
-# Every user-facing output path, not a sample of two: a stale spelling in any of
-# them sends someone to /usr/bin/kibitz.
+# A representative set of diagnostic paths, executed. Exhaustive coverage comes
+# from the static scan below instead -- running every command would mean writing
+# settings files, opening panes and invoking Codex.
 runtimeout="$("$PLUG/bin/kibitzer" lint "$PLUG/SKILL.md" 2>&1
               "$PLUG/bin/kibitzer" quiet bogus 2>&1 || true
               "$PLUG/bin/kibitzer" status "$WORK" 2>&1 || true
@@ -627,6 +628,14 @@ runtimeout="$("$PLUG/bin/kibitzer" lint "$PLUG/SKILL.md" 2>&1
               "$PLUG/bin/kibitzer" bogus-subcommand 2>&1 || true)"
 check "runtime diagnostics never print a bare kibitz command" \
   '! printf "%s" "$runtimeout" | grep -qE "(^|[^-a-zA-Z0-9_/])kibitz [a-z]"' "$runtimeout"
+
+# Static and exhaustive, where the runtime sample cannot be: any echo/printf in
+# the source that would tell a user to run a bare `kibitz <subcommand>`, in any
+# handler, whether or not a test happens to invoke it.
+stalesrc="$(grep -nE '(echo|printf)[^#]*[^-a-zA-Z0-9_/]kibitz ('"$SUBRE"')' \
+            "$PLUG/bin/kibitzer" || true)"
+check "no message anywhere in the source names a bare kibitz command" \
+  '[ -z "$stalesrc" ]' "$stalesrc"
 
 check "no help line tells the user to run a bare kibitz" \
   '! "$PLUG/bin/kibitzer" | grep -E >/dev/null "^  kibitz( |$)|\`kibitz\`"' \
