@@ -118,6 +118,10 @@ write_state() { # $1 cwd, $2 enabled(0|1) -- always advances the epoch
 }
 
 epoch_of() { local st; st="$(read_state "$1")"; printf '%s' "${st#* }"; }
+# Our own legacy (pre-quoting) registration, matched literally rather than by
+# pattern: unambiguous because we are the ones who wrote it.
+ours_exact() { printf '%s/bin/kibitz hook ' "$ADVISOR_HOME"; }
+
 is_enabled() { local st; st="$(read_state "$1")"; [ "${st%% *}" = "1" ]; }
 is_quiet()   { [ -f "$(proj_dir "$1")/quiet" ]; }
 
@@ -137,27 +141,44 @@ MIN_INTERVAL="${ADVISOR_MIN_INTERVAL:-45}"
 # Matches hooks this tool installed, including those written under its former
 # name. Without the legacy alternative, upgrading leaves dead `advisor hook`
 # commands registered alongside the new ones.
-# Ownership must be exact. We only ever write two shapes: the plugin form
-# "${CLAUDE_PLUGIN_ROOT}"/bin/kibitz hook <Event>, and the installer's
-# absolute path. Anything with a leading word -- `logger /bin/kibitz hook Stop`,
-# `env X=1 /bin/...` -- is somebody else's command and must survive both
-# install and uninstall. (kibitz|advisor) covers the pre-rename binary, and
-# the quoted absolute form covers a checkout whose path contains spaces.
+# What counts as ours, stated exactly, because both install and uninstall DELETE
+# whatever matches. We write two shapes: the plugin form
+# "${CLAUDE_PLUGIN_ROOT}"/bin/kibitz hook <Event>, and the installer's absolute
+# path -- quoted since the spaces fix, unquoted before it. (kibitz|advisor)
+# covers the pre-rename binary.
 #
-# Deliberately path-agnostic: a kibitz hook pointing at *any* path is ours, not
-# just this checkout's. That is what makes an upgrade replace the old command
-# instead of registering a second one -- a moved, renamed, or plugin-vs-manual
-# install would otherwise leave two hooks on every event, one of them dead.
-# The cost is that a second, independent kibitz install is also displaced. That
-# is the intended trade: two kibitz hooks on one event is never what you want.
+#   claimed    "${CLAUDE_PLUGIN_ROOT}"/bin/kibitz hook Stop
+#   claimed    /home/u/kibitz/bin/kibitz hook Stop
+#   claimed    "/dir with space/kibitz/bin/kibitz" hook Stop
+#   claimed    /dir with space/kibitz/bin/kibitz hook Stop      (only when that is
+#              THIS checkout's own path -- see ours_exact)
+#   claimed    "/usr/bin/logger /x/bin/kibitz" hook Stop        (correctly: quoted,
+#              this is one executable path that ends in /bin/kibitz, not a wrapper)
+#   survives   /usr/bin/logger /x/bin/kibitz hook Stop
+#   survives   logger /x/bin/kibitz hook Stop
+#   survives   env X=1 /x/bin/kibitz hook Stop
+#   survives   echo foo/bin/kibitz hook Stop
 #
-# The unquoted branch permits spaces, which is deliberate and not free. Earlier
-# versions wrote the path unquoted, so a checkout under "/dir with space" left a
-# hook only this branch can still recognise -- refusing it would strand a dead
-# command that fires on every event forever. The cost is that a wrapper starting
-# with an absolute path, `/usr/bin/logger /x/bin/kibitz hook Stop`, is claimed
-# too. A command with a bare leading word (`logger ...`, `env X=1 ...`) is not.
-OURS_RE='^("\$\{CLAUDE_PLUGIN_ROOT\}"/bin/(kibitz|advisor)|"/[^"]*/bin/(kibitz|advisor)"|/[^"]*/bin/(kibitz|advisor)) hook [A-Za-z]+$'
+# Path-agnostic for space-free paths: a kibitz hook pointing anywhere is ours, so
+# an upgrade replaces the old command instead of registering a second one. A
+# moved, renamed, or plugin-vs-manual install would otherwise leave two hooks on
+# every event, one of them dead. A second independent kibitz install is
+# displaced too; two kibitz hooks on one event is never what you want.
+#
+# The one gap that leaves: a legacy unquoted hook from a checkout that has since
+# moved AND whose path contained spaces is not cleaned. Reaching it would mean
+# guessing where an unquoted path ends, and guessing wrong deletes a command the
+# user wrote. A stale hook is the lesser harm, and the case is pinned by a test
+# so it stays a decision rather than becoming folklore.
+#
+# The unquoted branch forbids spaces on purpose. Earlier versions wrote the path
+# unquoted, so a checkout under "/dir with space" left a hook this pattern
+# cannot describe -- but widening it to allow spaces also swallows
+# `/usr/bin/logger /x/bin/kibitz hook Stop`, and deleting a command a user wrote
+# is worse than leaving a stale one. Legacy cleanup is handled instead by
+# OURS_EXACT: the literal path of the checkout doing the work, which is
+# unambiguous because we are the ones who wrote it.
+OURS_RE='^("\$\{CLAUDE_PLUGIN_ROOT\}"/bin/(kibitz|advisor)|"/[^"]*/bin/(kibitz|advisor)"|/[^ "]*/bin/(kibitz|advisor)) hook [A-Za-z]+$'
 
 init_sess() {
   local d; d="$(sess_dir "$1" "$2")"
@@ -677,6 +698,19 @@ kibitz: refusing a user-scope install from a transient location.
 EOM
     return 1
   fi
+  # The hook command is a string the hook runner hands to a shell. Quoting makes
+  # spaces safe; a double quote, backtick, $ or newline in the path would end or
+  # escape that quoting and turn a checkout location into shell syntax. Refuse
+  # rather than try to escape our way out of it -- the plugin route has no such
+  # limit, because ${CLAUDE_PLUGIN_ROOT} is expanded by the runner, not by us.
+  case "$ADVISOR_HOME" in
+    *'"'*|*'`'*|*'$'*|*"'"*|*'\'*)
+      echo "kibitz: refusing to install from a path containing quote, backtick," >&2
+      echo "  backslash or \$ characters -- it cannot be embedded safely in a hook" >&2
+      echo "  command. Move the checkout, or install it as a plugin instead:" >&2
+      echo "    $ADVISOR_HOME" >&2
+      return 1 ;;
+  esac
   tmpl="$ADVISOR_HOME/install/hooks.json"
   [ -f "$tmpl" ] || { echo "kibitz: missing $tmpl" >&2; return 1; }
   mkdir -p "$(dirname "$target")"
@@ -685,7 +719,8 @@ EOM
     echo "kibitz: $target is not valid JSON — refusing to touch it" >&2; return 1
   fi
   cp "$target" "$target.kibitz-backup"
-  merged="$(jq -s --arg adv "$ADVISOR_HOME/bin/kibitz" --arg ours "$OURS_RE" '
+  merged="$(jq -s --arg adv "$ADVISOR_HOME/bin/kibitz" --arg ours "$OURS_RE" \
+             --arg mine "$(ours_exact)" '
       (.[1] | walk(if type == "string" then sub("__KIBITZ__"; $adv) else . end)) as $new
       | .[0] as $cur
       | $cur * {hooks: (
@@ -697,7 +732,9 @@ EOM
                        # whole group would delete a user command that happens to
                        # sit alongside ours.
                        | map(.hooks = ((.hooks // [])
-                                       | map(select((.command // "") | test($ours) | not))))
+                                       | map(select(((.command // "") | test($ours)) or
+                                                    ((.command // "") | startswith($mine))
+                                                    | not))))
                        | map(select((.hooks | length) > 0))
                        + $new.hooks[$k]))
         )}' "$target" "$tmpl")" || { echo "kibitz: merge failed" >&2; return 1; }
@@ -760,10 +797,13 @@ cmd_uninstall() {
   # Leave a file with no hooks exactly as it is: `.hooks |= ...` would apply the
   # filter to null and error out, and creating an empty hooks key to avoid that
   # would mean writing to a file that had nothing for us to clean.
-  if ! jq --arg ours "$OURS_RE" 'if has("hooks") | not then . else .hooks |= (
+  if ! jq --arg ours "$OURS_RE" --arg mine "$(ours_exact)" \
+       'if has("hooks") | not then . else .hooks |= (
         with_entries(.value |= (
           map(.hooks = ((.hooks // [])
-                        | map(select((.command // "") | test($ours) | not))))
+                        | map(select(((.command // "") | test($ours)) or
+                                     ((.command // "") | startswith($mine))
+                                     | not))))
           | map(select((.hooks | length) > 0))))
         | with_entries(select(.value | length > 0))) end' "$target" >"$target.tmp" 2>/dev/null; then
     rm -f "$target.tmp"

@@ -533,22 +533,31 @@ check "uninstall removes the quoted spaced-path hook" \
   '[ -z "$(jq -r ".hooks.Stop[]?.hooks[]?.command // empty" "$SPROJ/.claude/settings.json" 2>/dev/null)" ]' \
   "$(jq -c '.hooks' "$SPROJ/.claude/settings.json" 2>/dev/null)"
 
-# Earlier versions wrote the executable unquoted, so a checkout under a spaced
-# path produced a hook the tightened matcher would not recognise. Refusing it
-# strands a dead command on every event; the spaced-path test above starts from
-# a freshly generated quoted hook and never exercises this.
+# Legacy cleanup is now provenance-based. A hook this checkout wrote in the
+# unquoted era is matched by its literal path, spaces and all...
 LEGACY="$WORK/legacyspace"; mkdir -p "$LEGACY/.claude"
+SPACED2="$WORK/legacy dir/kibitz"; mkdir -p "$(dirname "$SPACED2")"
+cp -r "$PLUG" "$SPACED2"
 for op in install uninstall; do
-  jq -n '{hooks:{Stop:[{hooks:[{type:"command",
-    command:"/tmp/dir with space/kibitz/bin/kibitz hook Stop"}]}]}}' \
-    >"$LEGACY/.claude/settings.json"
-  ( cd "$LEGACY" && "$PLUG/bin/kibitz" "$op" project ) >/dev/null 2>&1
-  left=$(jq -r '[.hooks.Stop[]?.hooks[]?.command]
-                | map(select(contains("dir with space"))) | length' \
-         "$LEGACY/.claude/settings.json" 2>/dev/null)
-  check "$op clears a legacy unquoted hook from a spaced checkout" \
-    '[ "$left" = "0" ]' "$(jq -c '.hooks' "$LEGACY/.claude/settings.json" 2>/dev/null)"
+  jq -n --arg c "$SPACED2/bin/kibitz hook Stop" \
+    '{hooks:{Stop:[{hooks:[{type:"command",command:$c}]}]}}' >"$LEGACY/.claude/settings.json"
+  ( cd "$LEGACY" && "$SPACED2/bin/kibitz" "$op" project ) >/dev/null 2>&1
+  left=$(jq -r --arg c "$SPACED2/bin/kibitz hook Stop" \
+    '[.hooks.Stop[]?.hooks[]?.command] | map(select(. == $c)) | length' \
+    "$LEGACY/.claude/settings.json" 2>/dev/null)
+  check "$op clears this checkout's own legacy unquoted spaced hook" \
+    '[ "${left:-1}" = "0" ]' "$(jq -c '.hooks' "$LEGACY/.claude/settings.json" 2>/dev/null)"
 done
+
+# ...but a legacy spaced hook left by a checkout that has since MOVED is not.
+# Deliberate: the generic rule cannot tell where an unquoted spaced path ends,
+# and guessing means deleting commands users wrote. Documented limit, not a bug.
+jq -n '{hooks:{Stop:[{hooks:[{type:"command",
+  command:"/gone/old dir/kibitz/bin/kibitz hook Stop"}]}]}}' >"$LEGACY/.claude/settings.json"
+( cd "$LEGACY" && "$PLUG/bin/kibitz" uninstall project ) >/dev/null 2>&1
+check "a legacy spaced hook from a moved checkout survives (documented limit)" \
+  'jq -r ".hooks.Stop[]?.hooks[]?.command" "$LEGACY/.claude/settings.json" | grep >/dev/null "old dir"' \
+  "$(jq -c '.hooks' "$LEGACY/.claude/settings.json" 2>/dev/null)"
 
 # A command that merely contains our path is not ours. The unquoted forms are
 # the dangerous ones: an earlier "anchored" regex still matched them, and the
@@ -571,6 +580,32 @@ for foreign in "logger /bin/kibitz hook Stop" \
       '[ "$surv" = "1" ]' "$foreign -> $(jq -c '.hooks' "$MIXDIR/.claude/settings.json" 2>/dev/null)"
   done
 done
+
+# An absolute-prefixed wrapper is somebody else's command and must survive.
+# An earlier revision claimed it, to reach legacy spaced hooks; provenance
+# matching reaches those instead, so the promise no longer has an exception.
+# The quoted form is different and is asserted separately below.
+for wrapper in "/usr/bin/logger /x/bin/kibitz hook Stop" \
+               "/usr/bin/env X=1 /x/bin/advisor hook Stop"; do
+  for op in install uninstall; do
+    jq -n --arg c "$wrapper" '{hooks:{Stop:[{hooks:[{type:"command",command:$c}]}]}}' \
+      >"$MIXDIR/.claude/settings.json"
+    ( cd "$MIXDIR" && "$PLUG/bin/kibitz" "$op" project ) >/dev/null 2>&1
+    kept=$(jq -r --arg c "$wrapper" '[.hooks.Stop[]?.hooks[]?.command]
+                                     | map(select(. == $c)) | length' \
+           "$MIXDIR/.claude/settings.json" 2>/dev/null)
+    check "$op keeps an absolute-prefixed wrapper" '[ "$kept" = "1" ]' "$wrapper"
+  done
+done
+
+# Quoted, it is one executable path ending in /bin/kibitz -- not a wrapper --
+# so claiming it is correct rather than a cost.
+jq -n '{hooks:{Stop:[{hooks:[{type:"command",
+  command:"\"/usr/bin/logger /x/bin/kibitz\" hook Stop"}]}]}}' >"$MIXDIR/.claude/settings.json"
+( cd "$MIXDIR" && "$PLUG/bin/kibitz" uninstall project ) >/dev/null 2>&1
+check "a quoted path ending in /bin/kibitz is claimed" \
+  '[ -z "$(jq -r ".hooks.Stop[]?.hooks[]?.command // empty" "$MIXDIR/.claude/settings.json" 2>/dev/null)" ]' \
+  "$(jq -c '.hooks' "$MIXDIR/.claude/settings.json" 2>/dev/null)"
 
 echo
 echo "install through a symlink  (found by the advisor, on itself)"
