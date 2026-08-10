@@ -492,6 +492,25 @@ check "install preserves a pre-existing hook on the same event" \
   'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "echo mine"'
 check "install preserves unrelated settings" \
   '[ "$(jq -r ".model" "$INSTDIR/.claude/settings.json")" = "x" ]'
+# Upgrading from the pre-rename binary must clean up, not duplicate. A matcher
+# that only knows the current name leaves a dead command registered on every
+# event, which then runs and fails for the life of every session.
+cat >"$INSTDIR/.claude/settings.json" <<LEGACY
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/old/path/skills/advisor/bin/advisor hook Stop","timeout":2}]}]},"model":"x"}
+LEGACY
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
+check "install replaces a hook left by the former binary name" \
+  '[ "$(jq -r "[.hooks.Stop[].hooks[].command] | length" "$INSTDIR/.claude/settings.json")" = "1" ]' \
+  "$(jq -r '[.hooks.Stop[].hooks[].command] | .[]' "$INSTDIR/.claude/settings.json" 2>/dev/null)"
+check "the surviving hook is the current one" \
+  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "bin/kibitz"'
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >/dev/null 2>&1
+check "uninstall also removes a legacy-named hook" \
+  '! jq -r ".hooks | tostring" "$INSTDIR/.claude/settings.json" | grep -qE "(kibitz|advisor) hook"'
+
+printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}\n' \
+  >"$INSTDIR/.claude/settings.json"
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
 ( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >/dev/null 2>&1
 check "uninstall removes only our hooks" \
   'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "echo mine" &&

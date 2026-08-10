@@ -78,13 +78,15 @@ tool calls since the last cycle, and `git diff`. It reads the repository itself;
 pointer, not a source.
 
 **What it is told.** As little as possible. The prompt gives Codex the situation and one open
-question — no checklist, no categories, no severity rubric. It does say explicitly that the range is
-wider than fault-finding: a simpler approach, an unexamined assumption, something worth preserving.
-Each advisory carries a free-text `kind` in Codex's own words, and `kibitz stats` counts them, so
-whether the constructive half actually materialises is measured rather than assumed. Unguided reviewers find the things a
-checklist would never list; a checklist turns the reviewer into a checklist executor. The output
-schema has no `severity` and no `verdict` field, deliberately: a severity enum is a review rubric
-wearing a JSON hat.
+question — no checklist, no categories, no severity rubric.
+Unguided reviewers find the things a checklist would never list; a checklist turns the reviewer into
+a checklist executor. The output schema has no `severity` and no `verdict` field, deliberately: a
+severity enum is a review rubric wearing a JSON hat.
+
+It does say explicitly that the range is wider than fault-finding: a simpler approach, an unexamined
+assumption, something worth preserving. Each advisory carries a free-text `kind` in Codex's own
+words, and `kibitz stats` counts them, so whether the constructive half actually materialises is
+measured rather than assumed.
 
 **What it costs you.** At most 3 advisories per tool call. Hooks do file I/O only and run in tens of
 milliseconds against Claude Code's 2s budget; the Codex call is fully detached and never blocks a

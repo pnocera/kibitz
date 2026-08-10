@@ -108,6 +108,11 @@ is_navigation() { [ -n "$1" ] && [ "${NAVIGATION_TOOLS#*" $1 "}" != "$NAVIGATION
 # ignores this: errors are where advice pays.
 MIN_INTERVAL="${ADVISOR_MIN_INTERVAL:-45}"
 
+# Matches hooks this tool installed, including those written under its former
+# name. Without the legacy alternative, upgrading leaves dead `advisor hook`
+# commands registered alongside the new ones.
+OURS_RE="/bin/(kibitz|advisor) hook "
+
 init_sess() {
   local d; d="$(sess_dir "$1" "$2")"
   mkdir -p "$d"/{tmp,outbox,outbox-processing,events,events-processing} 2>/dev/null
@@ -628,14 +633,14 @@ EOM
     echo "kibitz: $target is not valid JSON — refusing to touch it" >&2; return 1
   fi
   cp "$target" "$target.kibitz-backup"
-  merged="$(jq -s --arg adv "$ADVISOR_HOME/bin/kibitz" '
+  merged="$(jq -s --arg adv "$ADVISOR_HOME/bin/kibitz" --arg ours "$OURS_RE" '
       (.[1] | walk(if type == "string" then sub("__KIBITZ__"; $adv) else . end)) as $new
       | .[0] as $cur
       | $cur * {hooks: (
           ($cur.hooks // {}) as $h
           | reduce ($new.hooks | keys[]) as $k ($h;
               .[$k] = (( .[$k] // [] )
-                       | map(select((.hooks // []) | map(.command) | any(test("kibitz hook")) | not))
+                       | map(select((.hooks // []) | map(.command) | any(test($ours)) | not))
                        + $new.hooks[$k]))
         )}' "$target" "$tmpl")" || { echo "kibitz: merge failed" >&2; return 1; }
   # Never redirect onto the live file: `>` truncates it before jq writes, so an
@@ -693,8 +698,8 @@ cmd_uninstall() {
     *) echo "usage: advisor uninstall [project|user]" >&2; return 2 ;;
   esac
   [ -f "$target" ] || { echo "kibitz: nothing at $target"; return 0; }
-  if ! jq '.hooks |= (with_entries(.value |= map(select(
-        (.hooks // []) | map(.command) | any(test("kibitz hook")) | not)))
+  if ! jq --arg ours "$OURS_RE" '.hooks |= (with_entries(.value |= map(select(
+        (.hooks // []) | map(.command) | any(test($ours)) | not)))
       | with_entries(select(.value | length > 0)))' "$target" >"$target.tmp" 2>/dev/null; then
     rm -f "$target.tmp"
     echo "kibitz: could not rewrite $target — hooks left in place" >&2
