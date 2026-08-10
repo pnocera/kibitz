@@ -584,6 +584,13 @@ check "link creates exactly the command it reports" \
 check "help names the command link actually creates" \
   '"$PLUG/bin/kibitzer" | grep >/dev/null "put a .kibitzer. command"' \
   "$("$PLUG/bin/kibitzer" | grep link)"
+# Same drift, different file: the docs have named the colliding command three
+# times now. Check them the way the help text is checked.
+DOCS="$HERE/../README.md $PLUG/SKILL.md"
+staledoc=$(grep -nE '`kibitz (on|off|status|log|tail|pane|install|uninstall|link|doctor|stats|mute|lint|quiet|advise-now)' \
+             $DOCS 2>/dev/null || true)
+check "no doc instructs a bare kibitz subcommand" '[ -z "$staledoc" ]' "$staledoc"
+
 check "no help line tells the user to run a bare kibitz" \
   '! "$PLUG/bin/kibitzer" | grep -E >/dev/null "^  kibitz( |$)|\`kibitz\`"' \
   "$("$PLUG/bin/kibitzer" | grep -E "^  kibitz( |$)|.kibitz." || true)"

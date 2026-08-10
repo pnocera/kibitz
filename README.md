@@ -59,7 +59,11 @@ Requires `codex` (tested on codex-cli 0.147.0), `jq`, and coreutils.
 <summary>Registering hooks by hand instead</summary>
 
 For a checkout that does not live in a skills directory, `kibitzer install` merges hooks into
-`settings.json`, preserving anything already there, and `kibitz uninstall` removes only its own.
+`settings.json`, preserving anything already there, and `kibitzer uninstall` removes only its own.
+
+If you registered hooks with a build from before the executable was renamed, those entries point at
+a `bin/kibitz` that no longer exists and are no longer recognised as ours — remove them by hand, or
+delete the `hooks` block and run `kibitzer install` again.
 `kibitzer install user` targets `~/.claude/settings.json` but refuses to run from a project-local or
 temporary checkout, since it bakes an absolute path into your global config. `kibitzer link` puts the
 command on your `PATH`. None of this is needed for a plugin install.
@@ -153,7 +157,7 @@ shell.
 bash tests/run-tests.sh
 ```
 
-119 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+120 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
 reading, invocation confinement, the plugin package (manifest, hook events, relocatable
