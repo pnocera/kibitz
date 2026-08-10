@@ -385,6 +385,23 @@ PATH="$UNIBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "a repeated advisory is still suppressed" \
   '[ "$(find "$(sdir)/outbox" -name "*.json" 2>/dev/null | wc -l)" -eq 0 ]'
 
+# off must clear the producer queue too, or re-enabling resurrects activity the
+# operator opted out of.
+"$ADV" on "$WORK" >/dev/null
+date +%s >"$(sdir)/last-cycle"
+find "$(sdir)/events" "$(sdir)/events-processing" -name '*.json' -delete 2>/dev/null
+toolhook PostToolUse Edit >/dev/null
+check "tap recorded an event before off" '[ "$(evcount)" -eq 1 ]'
+"$ADV" off "$WORK" >/dev/null
+check "off clears the event queue, not just the outbox" '[ "$(evcount)" -eq 0 ]' \
+  "pre-off activity would feed the next cycle after re-enabling"
+"$ADV" on "$WORK" >/dev/null
+rm -f "$(sdir)/seen"; date +%s >"$(sdir)/last-cycle"
+: >"$PROMPTCAP"
+PATH="$CAPBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
+check "a cycle after off->on sees no pre-off activity" \
+  '! grep -q "Edit" "$PROMPTCAP"' "$(grep -A3 "Tool calls" "$PROMPTCAP" 2>/dev/null | head -4)"
+
 echo
 echo "install through a symlink  (found by the advisor, on itself)"
 

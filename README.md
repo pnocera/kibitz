@@ -50,7 +50,7 @@ advisor lint <file>              fail if a file reads like a review gate
 ```
 
 Default is **off**, per directory. `off` is immediate: it disables, reaps any in-flight Codex, and
-clears pending advice.
+clears pending advice and the tap queue.
 
 ## Behaviour
 
@@ -102,7 +102,7 @@ shell.
 bash tests/run-tests.sh
 ```
 
-65 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+68 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
 reading, invocation confinement, install/uninstall merge safety, and hot-path latency.

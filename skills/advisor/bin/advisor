@@ -128,8 +128,12 @@ cmd_off() {
   # mid-publication cannot leave records behind after the clear.
   exec 8>"$p/control.lock"
   flock 8
-  find "$p/sessions" -path '*/outbox/*' -name '*.json' -delete 2>/dev/null
-  find "$p/sessions" -path '*/outbox-processing/*' -name '*.json' -delete 2>/dev/null
+  # Both queues, not just the outbox. Leaving events/ behind means a later `on`
+  # feeds the next cycle tool activity from before the operator opted out.
+  local q
+  for q in outbox outbox-processing events events-processing; do
+    find "$p/sessions" -path "*/$q/*" -name '*.json' -delete 2>/dev/null
+  done
   flock -u 8
   echo "advisor: off for $cwd (reaped $killed in-flight, cleared pending advisories)"
 }
