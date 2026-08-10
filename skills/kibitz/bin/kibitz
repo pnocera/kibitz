@@ -110,7 +110,11 @@ write_state() { # $1 cwd, $2 enabled(0|1) -- always advances the epoch
   local p cur n; p="$(proj_dir "$1")"; mkdir -p "$p"
   cur="$(cat "$p/state" 2>/dev/null || printf '0 0')"
   n=$(( ${cur#* } + 1 ))
-  printf '%s %s\n' "$2" "$n" >"$p/state.tmp" && mv "$p/state.tmp" "$p/state"
+  # Private temp name: a shared one lets two concurrent control commands
+  # overwrite each other's prepared state between write and rename.
+  local tmp="$p/state.w.$$"
+  printf '%s %s\n' "$2" "$n" >"$tmp" && mv "$tmp" "$p/state"
+  rm -f "$tmp" 2>/dev/null
 }
 
 epoch_of() { local st; st="$(read_state "$1")"; printf '%s' "${st#* }"; }
