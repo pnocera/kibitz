@@ -1,9 +1,15 @@
 reviews/
 qa/
 *.advisor-backup
+*.kibitz-backup
 .claude/settings.json
 .claude/settings.local.json
 
 # Design notes and review trail stay local: they cite a private codebase.
 00-statement.md
 01-analysis.md
+
+# Local dev convenience only. Shipping this symlink breaks `npx skills add`:
+# the installer treats .claude/skills/ as a skill container, finds the link
+# instead of the real directory, and installs a link that dangles for the user.
+.claude/skills/

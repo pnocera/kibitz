@@ -13,7 +13,10 @@ trap 'rm -rf "$ADVISOR_STATE_ROOT" "$WORK"' EXIT
 pass=0; fail=0
 ok()   { printf '  \033[32mok\033[0m   %s\n' "$1"; pass=$((pass+1)); }
 no()   { printf '  \033[31mFAIL\033[0m %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; fail=$((fail+1)); }
-check(){ if eval "$2"; then ok "$1"; else no "$1" "${3:-}"; fi; }
+# `cmd | grep -q` under `set -o pipefail` reports failure even on a match:
+# grep exits early, the producer takes SIGPIPE, and pipefail surfaces that.
+# Assertions run with pipefail off so they test what they say they test.
+check(){ if ( set +o pipefail; eval "$2" ); then ok "$1"; else no "$1" "${3:-}"; fi; }
 
 SID="test-session"
 hookjson() { jq -cn --arg c "$WORK" --arg s "$SID" '{cwd:$c, session_id:$s, transcript_path:""}'; }
@@ -489,8 +492,9 @@ check "installed commands point at the real script, not the symlink dir" \
 # and must not invent a hooks key in a file that had none.
 printf '{"model":"x"}\n' >"$INSTDIR/.claude/settings.json"
 ( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >"$WORK/un.out" 2>&1
+UNRC=$?   # capture immediately: inside check's eval, $? is the previous command
 check "uninstall succeeds on settings with no hooks at all" \
-  '[ $? -eq 0 ] || ! grep -qi "could not" "$WORK/un.out"' "$(cat "$WORK/un.out")"
+  '[ "$UNRC" -eq 0 ]' "rc=$UNRC $(cat "$WORK/un.out")"
 check "uninstall leaves a hookless file untouched" \
   '[ "$(jq -S . "$INSTDIR/.claude/settings.json")" = "$(jq -S -n "{model:\"x\"}")" ]' \
   "$(cat "$INSTDIR/.claude/settings.json")"
@@ -548,6 +552,30 @@ printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]}
 check "uninstall removes only our hooks" \
   'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "echo mine" &&
    ! jq -r ".hooks | tostring" "$INSTDIR/.claude/settings.json" | grep -q "advisor hook"'
+
+echo
+echo "upgrade from the two-file state layout"
+
+# An install enabled under the old scheme has `enabled` and no `state`. Without
+# a migration it reads as disabled and silently stops watching after an upgrade.
+MIG="$(mktemp -d)"
+MIGH="$(printf '%s' "$MIG" | cksum | tr -d ' ' | cut -c1-12)"
+mkdir -p "$ADVISOR_STATE_ROOT/projects/$MIGH"
+: >"$ADVISOR_STATE_ROOT/projects/$MIGH/enabled"
+check "a legacy enabled flag is honoured after upgrade" \
+  '"$ADV" status "$MIG" | grep -q "enabled : yes"' "$("$ADV" status "$MIG" | head -2)"
+check "the legacy flag is adopted into the state file" \
+  '[ "$(cut -d" " -f1 "$ADVISOR_STATE_ROOT/projects/$MIGH/state")" = "1" ]'
+check "the legacy flag is removed once adopted" \
+  '[ ! -f "$ADVISOR_STATE_ROOT/projects/$MIGH/enabled" ]'
+"$ADV" off "$MIG" >/dev/null
+check "off after migration is authoritative and stays off" \
+  '"$ADV" status "$MIG" | grep -q "enabled : no"' "$("$ADV" status "$MIG" | head -2)"
+# Re-running status must not resurrect the flag from a stale file on disk.
+: >"$ADVISOR_STATE_ROOT/projects/$MIGH/enabled"
+check "a stale legacy flag cannot re-enable once state exists" \
+  '"$ADV" status "$MIG" | grep -q "enabled : no"' "$("$ADV" status "$MIG" | head -2)"
+rm -rf "$MIG"
 
 echo
 echo "the constructive half"

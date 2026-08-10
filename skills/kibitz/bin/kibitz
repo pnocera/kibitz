@@ -82,7 +82,29 @@ verified_worker_pid() {
 # an off/on pair and stamp pre-opt-out work as current.
 #
 # Format: "<0|1> <epoch>".
-read_state() { cat "$(proj_dir "$1")/state" 2>/dev/null || printf '0 0'; }
+read_state() {
+  local p; p="$(proj_dir "$1")"
+  if [ -f "$p/state" ]; then cat "$p/state"; return; fi
+  # Migration from the two-file scheme. An install that was enabled under the
+  # old layout has `enabled` and no `state`; without this it reads as disabled
+  # and silently stops watching after an upgrade. Adopt the flag once, then the
+  # state file is authoritative -- a later `off` writes 0 and stays 0, because
+  # cmd_off removes the legacy flag too.
+  if [ -f "$p/enabled" ]; then
+    # A concurrent `off` may be writing state right now. Use a private temp name
+    # (write_state owns state.tmp) and a no-clobber move, then report whatever
+    # actually ended up on disk -- never assume the migration won.
+    local tmp="$p/state.mig.$$"
+    if printf '1 0\n' >"$tmp" 2>/dev/null && mv -n "$tmp" "$p/state" 2>/dev/null &&
+       [ -f "$p/state" ]; then
+      rm -f "$p/enabled" 2>/dev/null       # only once the new state is durable
+    fi
+    rm -f "$tmp" 2>/dev/null
+    cat "$p/state" 2>/dev/null || printf '1 0'   # write failed: keep honouring the flag
+    return
+  fi
+  printf '0 0'
+}
 
 write_state() { # $1 cwd, $2 enabled(0|1) -- always advances the epoch
   local p cur n; p="$(proj_dir "$1")"; mkdir -p "$p"
@@ -142,6 +164,7 @@ cmd_off() {
   # is about to write, belongs to the old epoch and is inert from this instant.
   # Then disable, so no new cycle starts. Neither step can block or race.
   write_state "$cwd" 0
+  rm -f "$p/enabled"          # legacy flag: never let migration resurrect it
 
   local killed=0 pidf pid
   while IFS= read -r pidf; do
