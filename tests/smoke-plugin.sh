@@ -35,10 +35,21 @@ cp -r "$PLUG" "$CFG/skills/kibitz"
 ADVISOR_STATE_ROOT="$STATE" "$CFG/skills/kibitz/bin/kibitzer" on "$PROJ" >/dev/null
 H="$(printf '%s' "$PROJ" | cksum | tr -d ' ' | cut -c1-12)"
 
+# Also resolve the command through the Bash tool: the README's first instruction
+# is `kibitzer on`, which depends on the plugin exposing bin/ on that PATH. The
+# hook assertion below would still pass if that broke.
+WHICH="$PROJ/which-kibitzer.txt"
 echo "smoke: starting a headless session (this takes a minute)…"
 ( cd "$PROJ" && CLAUDE_CONFIG_DIR="$CFG" ADVISOR_STATE_ROOT="$STATE" \
-    timeout 180 claude -p "Run the bash command: echo smoke" \
+    timeout 180 claude -p "Run this bash command: command -v kibitzer > $WHICH; echo smoke" \
     --permission-mode bypassPermissions >/dev/null 2>&1 )
+
+if [ -s "$WHICH" ]; then
+  echo "smoke: kibitzer resolves on the Bash tool PATH -> $(cat "$WHICH")"
+else
+  echo "smoke: NOTE — kibitzer did not resolve on the Bash tool PATH." >&2
+  echo "  The README tells users to run it by name; they will need the full path." >&2
+fi
 
 n=$(find "$STATE/projects/$H/sessions" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
 if [ "$n" -ge 1 ]; then

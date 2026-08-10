@@ -647,10 +647,10 @@ cmd_lint() {
   local pat='VERDICT|FIXES_REQUIRED|\bBLOCKER\b|\bNIT\b|severity|PASS/FAIL|approved|rejected|sign-?off'
   [ -f "$target" ] || { echo "usage: kibitzer lint <file>" >&2; return 2; }
   if grep -nEi "$pat" "$target"; then
-    echo "kibitz lint: gate language found in $target" >&2
+    echo "kibitzer lint: gate language found in $target" >&2
     bad=1
   fi
-  [ "$bad" -eq 0 ] && echo "kibitz lint: clean"
+  [ "$bad" -eq 0 ] && echo "kibitzer lint: clean"
   return "$bad"
 }
 

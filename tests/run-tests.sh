@@ -594,18 +594,32 @@ check "the help output actually lists subcommands to check" '[ "${#SUBCMDS[@]}" 
 # SUBCMDS is derived from help, so a command wired into the dispatcher but never
 # documented would escape the scan entirely. Compare the two lists directly.
 mapfile -t DISPATCH < <(sed -n 's/^  \([a-z-]*\))  *shift; cmd_.*/\1/p' "$PLUG/bin/kibitzer" | sort -u)
+check "the dispatcher list parsed at all" \
+  '[ "${#DISPATCH[@]}" -ge 10 ] && case " ${DISPATCH[*]} " in *" on "*) true ;; *) false ;; esac' \
+  "${DISPATCH[*]:-none}"
 missing=""
 for c in "${DISPATCH[@]}"; do
   case " ${SUBCMDS[*]} " in *" $c "*) ;; *) missing="$missing $c" ;; esac
 done
 check "every dispatcher subcommand appears in the help output" '[ -z "$missing" ]' \
   "undocumented:$missing"
-DOCS=("$HERE/../README.md" "$PLUG/SKILL.md")
+# SKILL.md frontmatter quotes what a USER might say ("kibitz on") as trigger
+# phrases, not shell commands. Scan the body only.
+SKILLBODY="$WORK/skillbody.md"
+awk 'NR>1 && /^---$/{f=1;next} f' "$PLUG/SKILL.md" >"$SKILLBODY"
+DOCS=("$HERE/../README.md" "$SKILLBODY")
 SUBRE="$(IFS='|'; printf '%s' "${SUBCMDS[*]}")"
 # grep exit 1 is "no match" (good); 2 is an error and must not read as a pass.
-staledoc="$(grep -nE "\`kibitz ($SUBRE)" "${DOCS[@]}")"; grc=$?
+# No backtick requirement: the README lists commands as plain indented text, so
+# a stale entry there would otherwise sail through. `kibitz ` with a trailing
+# space cannot match `kibitzer on`.
+staledoc="$(grep -nE "(^|[^-a-zA-Z0-9_/])kibitz ($SUBRE)([^a-zA-Z0-9-]|\$)" "${DOCS[@]}")"; grc=$?
 check "the doc scan ran without error" '[ "$grc" -le 1 ]' "grep exited $grc"
 check "no doc instructs a bare kibitz subcommand" '[ -z "$staledoc" ]' "$staledoc"
+
+runtimeout="$("$PLUG/bin/kibitzer" lint "$PLUG/SKILL.md" 2>&1; "$PLUG/bin/kibitzer" quiet bogus 2>&1 || true)"
+check "runtime diagnostics never print a bare kibitz command" \
+  '! printf "%s" "$runtimeout" | grep -qE "(^|[^-a-zA-Z0-9_/])kibitz [a-z]"' "$runtimeout"
 
 check "no help line tells the user to run a bare kibitz" \
   '! "$PLUG/bin/kibitzer" | grep -E >/dev/null "^  kibitz( |$)|\`kibitz\`"' \
