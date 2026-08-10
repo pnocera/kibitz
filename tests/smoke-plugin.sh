@@ -44,11 +44,20 @@ echo "smoke: starting a headless session (this takes a minute)…"
     timeout 180 claude -p "Run this bash command: command -v kibitzer > $WHICH; echo smoke" \
     --permission-mode bypassPermissions >/dev/null 2>&1 )
 
-if [ -s "$WHICH" ]; then
-  echo "smoke: kibitzer resolves on the Bash tool PATH -> $(cat "$WHICH")"
+resolved="$(cat "$WHICH" 2>/dev/null)"
+want="$CFG/skills/kibitz/bin/kibitzer"
+if [ "$(readlink -f "$resolved" 2>/dev/null)" = "$(readlink -f "$want")" ]; then
+  echo "smoke: kibitzer resolves on the Bash tool PATH -> $resolved"
 else
-  echo "smoke: NOTE — kibitzer did not resolve on the Bash tool PATH." >&2
-  echo "  The README tells users to run it by name; they will need the full path." >&2
+  cat >&2 <<EOF
+smoke: FAIL — the Bash tool did not resolve kibitzer to this plugin.
+  resolved: ${resolved:-<nothing>}
+  expected: $want
+The README's first instruction is \`kibitzer on\`, which needs the plugin to put
+its bin/ on that PATH. A shadowing binary or a loader change breaks it, and the
+hook assertion below would still have passed.
+EOF
+  exit 1
 fi
 
 n=$(find "$STATE/projects/$H/sessions" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)

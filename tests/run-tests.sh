@@ -617,7 +617,14 @@ staledoc="$(grep -nE "(^|[^-a-zA-Z0-9_/])kibitz ($SUBRE)([^a-zA-Z0-9-]|\$)" "${D
 check "the doc scan ran without error" '[ "$grc" -le 1 ]' "grep exited $grc"
 check "no doc instructs a bare kibitz subcommand" '[ -z "$staledoc" ]' "$staledoc"
 
-runtimeout="$("$PLUG/bin/kibitzer" lint "$PLUG/SKILL.md" 2>&1; "$PLUG/bin/kibitzer" quiet bogus 2>&1 || true)"
+# Every user-facing output path, not a sample of two: a stale spelling in any of
+# them sends someone to /usr/bin/kibitz.
+runtimeout="$("$PLUG/bin/kibitzer" lint "$PLUG/SKILL.md" 2>&1
+              "$PLUG/bin/kibitzer" quiet bogus 2>&1 || true
+              "$PLUG/bin/kibitzer" status "$WORK" 2>&1 || true
+              "$PLUG/bin/kibitzer" mute 2>&1 || true
+              "$PLUG/bin/kibitzer" doctor 2>&1 || true
+              "$PLUG/bin/kibitzer" bogus-subcommand 2>&1 || true)"
 check "runtime diagnostics never print a bare kibitz command" \
   '! printf "%s" "$runtimeout" | grep -qE "(^|[^-a-zA-Z0-9_/])kibitz [a-z]"' "$runtimeout"
 
