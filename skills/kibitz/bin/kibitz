@@ -132,7 +132,7 @@ cmd_on() {
   rm -f "$p/quiet"
   echo "kibitz: on for $cwd"
   echo "  state: $p"
-  echo "  log:   advisor tail   (or: advisor pane, for a Herdr side pane)"
+  echo "  log:   kibitz tail   (or: kibitz pane, for a Herdr side pane)"
 }
 
 cmd_off() {
@@ -168,7 +168,7 @@ cmd_quiet() {
   case "$mode" in
     on)  : >"$p/quiet"; echo "kibitz: quiet — still analysing and logging, not injecting" ;;
     off) rm -f "$p/quiet"; echo "kibitz: quiet off — injecting again" ;;
-    *)   echo "usage: advisor quiet on|off" >&2; return 2 ;;
+    *)   echo "usage: kibitz quiet on|off" >&2; return 2 ;;
   esac
 }
 
@@ -239,12 +239,17 @@ cmd_pane() { # open a Herdr side pane following the advice log
       "$out" "$ADVISOR_HOME/bin/kibitz" "$cwd" >&2
     return 1
   }
-  # herdr wraps replies as {"id":"cli:pane:split","result":{...}} — the top-level
-  # "id" is the request id, not the pane. Take the pane id from the result.
-  pane="$(printf '%s' "$out" | jq -r '.result.pane_id // .result.id // .pane_id // empty' 2>/dev/null)"
-  [ -n "$pane" ] || pane="$(printf '%s' "$out" | tr -d '[:space:]"')"
-  [ -n "$pane" ] || { echo "kibitz: split gave no pane id: $out" >&2; return 1; }
-  herdr pane rename "$pane" advisor >/dev/null 2>&1
+  # herdr wraps replies as {"id":"cli:pane:split","result":{"pane":{...}}} — the
+  # top-level "id" is the request id, and the pane id is nested. Never fall back
+  # to scraping the blob: that yields a garbage id that is then passed to
+  # `herdr pane run`, which fails confusingly instead of saying what went wrong.
+  pane="$(printf '%s' "$out" |
+    jq -r '.result.pane.pane_id // .result.pane_id // .pane_id // empty' 2>/dev/null)"
+  if [ -z "$pane" ]; then
+    printf 'kibitz: could not read a pane id from herdr\n  reply: %s\n' "$out" >&2
+    return 1
+  fi
+  herdr pane rename "$pane" kibitz >/dev/null 2>&1
   herdr pane run "$pane" "$ADVISOR_HOME/bin/kibitz" tail "$cwd" >/dev/null 2>&1 || {
     echo "kibitz: pane $pane opened but the tail did not start" >&2; return 1; }
   echo "kibitz: following the log in pane $pane"
@@ -531,7 +536,7 @@ cmd_worker() {
     - <<<"$prompt" >>"$d/worker.log" 2>&1
   rc=$?
   # A failed cycle must never break the session, but it must not be invisible
-  # either: record it where `advisor status` will show it.
+  # either: record it where `kibitz status` will show it.
   if [ "$rc" -ne 0 ] || [ ! -s "$out" ]; then
     {
       printf '%s  codex exited %s%s\n' "$(date -Is)" "$rc" \
@@ -590,12 +595,12 @@ cmd_worker() {
 cmd_lint() {
   local target="${1:-}" bad=0
   local pat='VERDICT|FIXES_REQUIRED|\bBLOCKER\b|\bNIT\b|severity|PASS/FAIL|approved|rejected|sign-?off'
-  [ -f "$target" ] || { echo "usage: advisor lint <file>" >&2; return 2; }
+  [ -f "$target" ] || { echo "usage: kibitz lint <file>" >&2; return 2; }
   if grep -nEi "$pat" "$target"; then
-    echo "advisor lint: gate language found in $target" >&2
+    echo "kibitz lint: gate language found in $target" >&2
     bad=1
   fi
-  [ "$bad" -eq 0 ] && echo "advisor lint: clean"
+  [ "$bad" -eq 0 ] && echo "kibitz lint: clean"
   return "$bad"
 }
 
@@ -607,7 +612,7 @@ cmd_install() {
   case "$scope" in
     project) target="$PWD/.claude/settings.json" ;;
     user)    target="$HOME/.claude/settings.json" ;;
-    *) echo "usage: advisor install [project|user] [--force]" >&2; return 2 ;;
+    *) echo "usage: kibitz install [project|user] [--force]" >&2; return 2 ;;
   esac
   # A user-scope install bakes this checkout's absolute path into the global
   # settings. If the checkout is project-local or temporary, deleting it later
@@ -619,8 +624,8 @@ kibitz: refusing a user-scope install from a transient location.
     $ADVISOR_HOME
   Global hooks would hard-code that path, and every Claude session would break
   if it is moved or removed. Either:
-    - clone advisor somewhere stable and run 'advisor install user' from there, or
-    - use 'advisor install' (project scope) here, or
+    - clone kibitz somewhere stable and run 'kibitz install user' from there, or
+    - use 'kibitz install' (project scope) here, or
     - re-run with --force if you are sure this path is permanent.
 EOM
     return 1
@@ -640,7 +645,13 @@ EOM
           ($cur.hooks // {}) as $h
           | reduce ($new.hooks | keys[]) as $k ($h;
               .[$k] = (( .[$k] // [] )
-                       | map(select((.hooks // []) | map(.command) | any(test($ours)) | not))
+                       # Drop only OUR commands from inside each group. Claude
+                       # allows several commands in one group, so removing the
+                       # whole group would delete a user command that happens to
+                       # sit alongside ours.
+                       | map(.hooks = ((.hooks // [])
+                                       | map(select((.command // "") | test($ours) | not))))
+                       | map(select((.hooks | length) > 0))
                        + $new.hooks[$k]))
         )}' "$target" "$tmpl")" || { echo "kibitz: merge failed" >&2; return 1; }
   # Never redirect onto the live file: `>` truncates it before jq writes, so an
@@ -665,7 +676,7 @@ cmd_link() {
   if [ -e "$dir/kibitz" ] || [ -L "$dir/kibitz" ]; then
     local cur; cur="$(readlink -f "$dir/kibitz" 2>/dev/null)"
     if [ "$cur" != "$(readlink -f "$ADVISOR_HOME/bin/kibitz")" ] && [ "${2:-}" != "--force" ]; then
-      echo "kibitz: $dir/kibitz already exists and is not this advisor" >&2
+      echo "kibitz: $dir/kibitz already exists and is not this kibitz" >&2
       echo "  it points at: ${cur:-<unreadable>}" >&2
       echo "  refusing to replace it; re-run with --force if that is what you want" >&2
       return 1
@@ -678,7 +689,7 @@ cmd_link() {
     *":$dir:"*) : ;;
     *) echo "  note: $dir is not on your PATH" >&2 ;;
   esac
-  is_portable_home || echo "  note: this links to a project-local checkout; see 'advisor install user'" >&2
+  is_portable_home || echo "  note: this links to a project-local checkout; see 'kibitz install user'" >&2
 }
 
 # A user-scope install writes this checkout's absolute path into the global
@@ -695,12 +706,18 @@ cmd_uninstall() {
   case "$scope" in
     project) target="$PWD/.claude/settings.json" ;;
     user)    target="$HOME/.claude/settings.json" ;;
-    *) echo "usage: advisor uninstall [project|user]" >&2; return 2 ;;
+    *) echo "usage: kibitz uninstall [project|user]" >&2; return 2 ;;
   esac
   [ -f "$target" ] || { echo "kibitz: nothing at $target"; return 0; }
-  if ! jq --arg ours "$OURS_RE" '.hooks |= (with_entries(.value |= map(select(
-        (.hooks // []) | map(.command) | any(test($ours)) | not)))
-      | with_entries(select(.value | length > 0)))' "$target" >"$target.tmp" 2>/dev/null; then
+  # Leave a file with no hooks exactly as it is: `.hooks |= ...` would apply the
+  # filter to null and error out, and creating an empty hooks key to avoid that
+  # would mean writing to a file that had nothing for us to clean.
+  if ! jq --arg ours "$OURS_RE" 'if has("hooks") | not then . else .hooks |= (
+        with_entries(.value |= (
+          map(.hooks = ((.hooks // [])
+                        | map(select((.command // "") | test($ours) | not))))
+          | map(select((.hooks | length) > 0))))
+        | with_entries(select(.value | length > 0))) end' "$target" >"$target.tmp" 2>/dev/null; then
     rm -f "$target.tmp"
     echo "kibitz: could not rewrite $target — hooks left in place" >&2
     return 1
@@ -723,7 +740,7 @@ cmd_statusline() {
 cmd_advise_now() {
   local cwd="${1:-$PWD}" p sid d
   p="$(proj_dir "$cwd")"
-  is_enabled "$cwd" || { echo "kibitz: not enabled here (advisor on)" >&2; return 1; }
+  is_enabled "$cwd" || { echo "kibitz: not enabled here (kibitz on)" >&2; return 1; }
   sid="$(cat "$p/current-session" 2>/dev/null)"
   [ -n "$sid" ] || { echo "kibitz: no session yet" >&2; return 1; }
   d="$(sess_dir "$cwd" "$sid")"
@@ -732,7 +749,7 @@ cmd_advise_now() {
   fi
   rm -f "$d/last-cycle"
   maybe_spawn "$cwd" "$sid" "$(latest_transcript "$sid")" 1
-  echo "kibitz: asked for a contribution; watch 'advisor tail'"
+  echo "kibitz: asked for a contribution; watch 'kibitz tail'"
 }
 
 # Best-effort transcript lookup for a manually requested cycle: the hooks supply
@@ -751,7 +768,7 @@ cmd_mute() {
     list) cwd="${2:-$PWD}"; p="$(proj_dir "$cwd")"
           if [ -s "$p/mutes" ]; then cat "$p/mutes"; else echo "kibitz: nothing muted"; fi ;;
     clear) cwd="${2:-$PWD}"; p="$(proj_dir "$cwd")"; rm -f "$p/mutes"; echo "kibitz: mutes cleared" ;;
-    "") echo "usage: advisor mute <text> | list | clear" >&2; return 2 ;;
+    "") echo "usage: kibitz mute <text> | list | clear" >&2; return 2 ;;
     *) pat="$1"; cwd="${2:-$PWD}"; p="$(proj_dir "$cwd")"; mkdir -p "$p"
        printf '%s\n' "$pat" >>"$p/mutes"
        echo "kibitz: muting advisories matching '$pat'" ;;
@@ -809,7 +826,7 @@ kibitz — Codex as a background advisory process for Claude Code
   kibitz count [cwd]         pending count (for the statusline)
   kibitz lint <file>         fail if a file contains review/gate language
   kibitz doctor              check dependencies
-  kibitz link [dir]          put an `advisor` command on your PATH (~/.local/bin)
+  kibitz link [dir]          put a `kibitz` command on your PATH (~/.local/bin)
   kibitz install [project|user]    merge hooks into settings.json (backed up)
   kibitz uninstall [project|user]  remove them again
   kibitz statusline [cwd]    pending-count segment for the status line

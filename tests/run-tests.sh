@@ -485,6 +485,16 @@ check "installed commands point at the real script, not the symlink dir" \
   'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "skills/kibitz/bin/kibitz"'
 
 # Existing hooks must survive, and uninstall must put things back.
+# Uninstall on a project that never installed anything is a no-op, not an error,
+# and must not invent a hooks key in a file that had none.
+printf '{"model":"x"}\n' >"$INSTDIR/.claude/settings.json"
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >"$WORK/un.out" 2>&1
+check "uninstall succeeds on settings with no hooks at all" \
+  '[ $? -eq 0 ] || ! grep -qi "could not" "$WORK/un.out"' "$(cat "$WORK/un.out")"
+check "uninstall leaves a hookless file untouched" \
+  '[ "$(jq -S . "$INSTDIR/.claude/settings.json")" = "$(jq -S -n "{model:\"x\"}")" ]' \
+  "$(cat "$INSTDIR/.claude/settings.json")"
+
 printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}\n' \
   >"$INSTDIR/.claude/settings.json"
 ( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
@@ -507,6 +517,29 @@ check "the surviving hook is the current one" \
 ( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >/dev/null 2>&1
 check "uninstall also removes a legacy-named hook" \
   '! jq -r ".hooks | tostring" "$INSTDIR/.claude/settings.json" | grep -qE "(kibitz|advisor) hook"'
+
+printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}\n' \
+  >"$INSTDIR/.claude/settings.json"
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
+# Claude allows several commands inside one hook group. Filtering by group
+# instead of by command destroys a user's command that happens to sit next to
+# ours -- the previous tests only ever used separate groups, so they missed it.
+cat >"$INSTDIR/.claude/settings.json" <<MIXED
+{"hooks":{"Stop":[{"hooks":[
+  {"type":"command","command":"echo theirs","timeout":2},
+  {"type":"command","command":"/old/skills/advisor/bin/advisor hook Stop","timeout":2}
+]}]},"model":"x"}
+MIXED
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
+check "install keeps a user command nested alongside ours" \
+  'jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep -q "echo theirs"' \
+  "$(jq -r '[.hooks.Stop[].hooks[].command] | .[]' "$INSTDIR/.claude/settings.json" 2>/dev/null)"
+check "install still drops the nested legacy command" \
+  '! jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep -q "bin/advisor hook"'
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >/dev/null 2>&1
+check "uninstall keeps a user command nested alongside ours" \
+  'jq -r "[.hooks.Stop[].hooks[].command] | .[]" "$INSTDIR/.claude/settings.json" | grep -q "echo theirs"' \
+  "$(jq -r '.hooks | tostring' "$INSTDIR/.claude/settings.json" 2>/dev/null)"
 
 printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}\n' \
   >"$INSTDIR/.claude/settings.json"
