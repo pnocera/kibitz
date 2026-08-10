@@ -1,4 +1,4 @@
-# advisor
+# kibitz
 
 **Codex as a background advisory process for Claude Code.**
 
@@ -21,42 +21,47 @@ turn ends ────► hook ─────────────┴─► 
 npx skills add pnocera/advisor
 ```
 
-That installs to `.agents/skills/advisor/` and symlinks it for Claude Code. It does **not** put an
-`advisor` command on your PATH, so either use the full path or make a shim:
+The repo is `advisor`; the skill it installs is called **kibitz**, because Claude Code already has a
+built-in `/advisor` command and shadowing it is a bad idea.
+
+That installs to `.agents/skills/kibitz/` and symlinks it for Claude Code. It does **not** put a
+`kibitz` command on your PATH, so either use the full path or make a shim:
 
 ```bash
-ADV=./.agents/skills/advisor/bin/advisor
-$ADV link            # optional: puts `advisor` in ~/.local/bin
-$ADV doctor          # check dependencies
-$ADV install         # merge hooks into .claude/settings.json (existing hooks preserved)
-$ADV on              # opt in for this directory
+K=./.agents/skills/kibitz/bin/kibitz
+$K link              # optional: puts `kibitz` in ~/.local/bin
+$K doctor            # check dependencies
+$K install           # merge hooks into .claude/settings.json (existing hooks preserved)
+$K on                # opt in for this directory
 ```
+
+To update later: `npx skills update` (`-p` for project scope, `-g` for global).
 
 **Restart Claude Code after `install`** — hooks are snapshotted at session start, so changes to
 `settings.json` do not take effect in a running session.
 
 Requires `codex` (tested on codex-cli 0.147.0), `jq`, and coreutils.
 
-`advisor install user` writes to `~/.claude/settings.json` instead of the project — but it bakes
+`kibitz install user` writes to `~/.claude/settings.json` instead of the project — but it bakes
 this checkout's absolute path into your global config, so it refuses to run from a project-local or
 temporary location. For a user-scope install, clone the repo somewhere stable and run it from there.
-Both scopes back the file up first and write via atomic rename; `advisor uninstall [project|user]`
-removes only advisor's own hooks.
+Both scopes back the file up first and write via atomic rename; `kibitz uninstall [project|user]`
+removes only kibitz's own hooks.
 
 ## Use
 
 ```
-advisor on | off                 opt in / out for this directory
-advisor quiet on | off           keep analysing and logging, stop injecting
-advisor status                   what is enabled, pending, running
-advisor log [cwd] [n]            what has been said
-advisor tail [cwd]               follow it live
-advisor pane [cwd]               Herdr side pane following the log
-advisor statusline [cwd]         pending-count segment for your status line
-advisor advise-now [cwd]         ask for a contribution now, without waiting
-advisor mute <text>|list|clear   stop hearing about a topic
-advisor stats [cwd]              what kinds of things it has been saying
-advisor lint <file>              fail if a file reads like a review gate
+kibitz on | off                 opt in / out for this directory
+kibitz quiet on | off           keep analysing and logging, stop injecting
+kibitz status                   what is enabled, pending, running
+kibitz log [cwd] [n]            what has been said
+kibitz tail [cwd]               follow it live
+kibitz pane [cwd]               Herdr side pane following the log
+kibitz statusline [cwd]         pending-count segment for your status line
+kibitz advise-now [cwd]         ask for a contribution now, without waiting
+kibitz mute <text>|list|clear   stop hearing about a topic
+kibitz stats [cwd]              what kinds of things it has been saying
+kibitz lint <file>              fail if a file reads like a review gate
 ```
 
 Default is **off**, per directory. `off` is immediate: it disables, reaps any in-flight Codex, and
@@ -75,7 +80,7 @@ pointer, not a source.
 **What it is told.** As little as possible. The prompt gives Codex the situation and one open
 question — no checklist, no categories, no severity rubric. It does say explicitly that the range is
 wider than fault-finding: a simpler approach, an unexamined assumption, something worth preserving.
-Each advisory carries a free-text `kind` in Codex's own words, and `advisor stats` counts them, so
+Each advisory carries a free-text `kind` in Codex's own words, and `kibitz stats` counts them, so
 whether the constructive half actually materialises is measured rather than assumed. Unguided reviewers find the things a
 checklist would never list; a checklist turns the reviewer into a checklist executor. The output
 schema has no `severity` and no `verdict` field, deliberately: a severity enum is a review rubric
@@ -140,7 +145,7 @@ invocation, or the path resolution, re-check that.
 
 ## Provenance
 
-Most of the bugs this code has had were found by pointing the advisor at itself: an `off` that raced
+Most of the bugs this code has had were found by pointing kibitz at itself: an `off` that raced
 a completing worker, a fingerprint that collapsed every non-Latin note to one, a control lock taken
 in an order that made `off` block behind the worker it was stopping, a bare PID that could have
 terminated an unrelated process, an `EXIT` trap referencing an out-of-scope variable, and an

@@ -4,7 +4,7 @@
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ADV="$HERE/../skills/advisor/bin/advisor"
+ADV="$HERE/../skills/kibitz/bin/kibitz"
 export ADVISOR_STATE_ROOT
 ADVISOR_STATE_ROOT="$(mktemp -d)"
 WORK="$(mktemp -d)"
@@ -84,7 +84,7 @@ check "drain: emitted block carries the untrusted-provenance banner" \
   'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep -q "UNTRUSTED ADVISORY"'
 
 check "drain: emitted block carries the sentinel for self-filtering" \
-  'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep -q "⟦advisor⟧"'
+  'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep -q "⟦kibitz⟧"'
 
 check "drain: hookEventName matches the firing event" \
   '[ "$(printf "%s" "$out" | jq -r ".hookSpecificOutput.hookEventName")" = "PreToolUse" ]'
@@ -470,29 +470,29 @@ echo "install through a symlink  (found by the advisor, on itself)"
 # with no override -- the documented entrypoint -- the sibling lib/ and
 # hooks.json must still be found.
 LINKROOT="$WORK/linkroot"; mkdir -p "$LINKROOT"
-ln -sfn "$HERE/../skills/advisor/bin" "$LINKROOT/bin"
-( cd "$LINKROOT" && ./bin/advisor doctor ) >"$WORK/doctor.out" 2>&1
+ln -sfn "$HERE/../skills/kibitz/bin" "$LINKROOT/bin"
+( cd "$LINKROOT" && ./bin/kibitz doctor ) >"$WORK/doctor.out" 2>&1
 check "doctor finds schema and prompt through a symlinked bin/" \
-  '! grep -q "MISS" "$WORK/doctor.out"' "$(cat "$WORK/doctor.out")"
+  '[ -s "$WORK/doctor.out" ] && ! grep -q "MISS" "$WORK/doctor.out"' "$(cat "$WORK/doctor.out")"
 
 INSTDIR="$WORK/instproj"; mkdir -p "$INSTDIR"
-( cd "$INSTDIR" && "$LINKROOT/bin/advisor" install project ) >"$WORK/install.out" 2>&1
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >"$WORK/install.out" 2>&1
 check "install works through a symlink with no ADVISOR_HOME override" \
   '[ -f "$INSTDIR/.claude/settings.json" ]' "$(cat "$WORK/install.out")"
 check "install registers the tap events too" \
   'jq -e ".hooks.PostToolUse and .hooks.PostToolUseFailure and .hooks.Stop" "$INSTDIR/.claude/settings.json" >/dev/null'
 check "installed commands point at the real script, not the symlink dir" \
-  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "skills/advisor/bin/advisor"'
+  'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "skills/kibitz/bin/kibitz"'
 
 # Existing hooks must survive, and uninstall must put things back.
 printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}\n' \
   >"$INSTDIR/.claude/settings.json"
-( cd "$INSTDIR" && "$LINKROOT/bin/advisor" install project ) >/dev/null 2>&1
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" install project ) >/dev/null 2>&1
 check "install preserves a pre-existing hook on the same event" \
   'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "echo mine"'
 check "install preserves unrelated settings" \
   '[ "$(jq -r ".model" "$INSTDIR/.claude/settings.json")" = "x" ]'
-( cd "$INSTDIR" && "$LINKROOT/bin/advisor" uninstall project ) >/dev/null 2>&1
+( cd "$INSTDIR" && "$LINKROOT/bin/kibitz" uninstall project ) >/dev/null 2>&1
 check "uninstall removes only our hooks" \
   'jq -r ".hooks.Stop[].hooks[].command" "$INSTDIR/.claude/settings.json" | grep -q "echo mine" &&
    ! jq -r ".hooks | tostring" "$INSTDIR/.claude/settings.json" | grep -q "advisor hook"'
@@ -501,12 +501,12 @@ echo
 echo "the constructive half"
 
 check "the prompt invites more than fault-finding" \
-  'grep -qi "wider than" "$HERE/../skills/advisor/lib/prompt.tmpl" &&
-   grep -qi "simpler way" "$HERE/../skills/advisor/lib/prompt.tmpl"'
+  'grep -qi "wider than" "$HERE/../skills/kibitz/lib/prompt.tmpl" &&
+   grep -qi "simpler way" "$HERE/../skills/kibitz/lib/prompt.tmpl"'
 check "advisories carry a free-text kind" \
-  'jq -e ".properties.advisories.items.required | index(\"kind\")" "$HERE/../skills/advisor/lib/advice.schema.json" >/dev/null'
+  'jq -e ".properties.advisories.items.required | index(\"kind\")" "$HERE/../skills/kibitz/lib/advice.schema.json" >/dev/null'
 check "kind is free text, not an enum" \
-  '! jq -e ".properties.advisories.items.properties.kind | has(\"enum\")" "$HERE/../skills/advisor/lib/advice.schema.json" >/dev/null'
+  '! jq -e ".properties.advisories.items.properties.kind | has(\"enum\")" "$HERE/../skills/kibitz/lib/advice.schema.json" >/dev/null'
 
 KINDBIN="$WORK/kindbin"; mkdir -p "$KINDBIN"
 cat >"$KINDBIN/codex" <<'FAKE'
@@ -559,11 +559,11 @@ echo
 echo "register (decision 7)"
 
 check "no gate language in the prompt sent to Codex" \
-  '"$ADV" lint "$HERE/../skills/advisor/lib/prompt.tmpl" >/dev/null'
+  '"$ADV" lint "$HERE/../skills/kibitz/lib/prompt.tmpl" >/dev/null'
 check "no severity or verdict field in the advice schema" \
-  '! jq -e ".. | objects | has(\"severity\") or has(\"verdict\")" "$HERE/../skills/advisor/lib/advice.schema.json" | grep -q true'
+  '! jq -e ".. | objects | has(\"severity\") or has(\"verdict\")" "$HERE/../skills/kibitz/lib/advice.schema.json" | grep -q true'
 check "schema permits an empty advisory list" \
-  '[ "$(jq -r ".properties.advisories.minItems // 0" "$HERE/../skills/advisor/lib/advice.schema.json")" = "0" ]'
+  '[ "$(jq -r ".properties.advisories.minItems // 0" "$HERE/../skills/kibitz/lib/advice.schema.json")" = "0" ]'
 
 echo
 echo "confinement (01-analysis.md §6.2) — captures the real invocation"
