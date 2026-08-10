@@ -175,8 +175,8 @@ cmd_quiet() {
 cmd_status() {
   local cwd="${1:-$PWD}" p sid d
   p="$(proj_dir "$cwd")"
-  printf 'advisor  %s\n' "$cwd"
-  printf '  enabled : %s\n' "$(is_enabled "$cwd" && echo yes || echo 'no  (advisor on)')"
+  printf 'kibitz  %s\n' "$cwd"
+  printf '  enabled : %s\n' "$(is_enabled "$cwd" && echo yes || echo 'no  (kibitz on)')"
   printf '  quiet   : %s\n' "$([ -f "$p/quiet" ] && echo yes || echo no)"
   [ -d "$p" ] || { printf '  state   : none yet\n'; return 0; }
   sid="$(cat "$p/current-session" 2>/dev/null)"
