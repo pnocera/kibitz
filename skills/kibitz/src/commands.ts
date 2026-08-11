@@ -223,19 +223,17 @@ export function cmdAdviseNow(cwd = process.cwd()): number {
   const d = sessDir(cwd, sid)
   if (verifiedWorkerPid(path.join(d, "worker.pid"))) { out("kibitzer: a cycle is already running"); return 0 }
   rm(path.join(d, "last-cycle"))
+  // Check synchronously. spawn()'s error event is asynchronous, and this
+  // command exits immediately after printing, so an ENOENT listener would never
+  // run: the operator would be told to watch a cycle that never started.
+  if (!which("setsid")) { err("kibitzer: setsid not found; cannot start a cycle"); return 1 }
   let log: number | undefined
   try {
     log = fs.openSync(path.join(d, "worker.log"), "a")
     const child = spawn("setsid",
       [BIN, "worker", cwd, sid, latestTranscript(sid), epochOf(cwd)],
       { detached: true, stdio: ["ignore", log, log] })
-    // Unlike a hook, a manual trigger should say so when it cannot start --
-    // but as an unhandled error event this would surface after the success
-    // line, and take the process down with it.
-    child.on("error", e => {
-      if (log !== undefined) try { fs.closeSync(log) } catch {}
-      err(`kibitzer: could not start a cycle (${(e as Error).message})`)
-    })
+    child.on("error", () => { if (log !== undefined) try { fs.closeSync(log) } catch {} })
     child.unref()
   } catch (e) {
     if (log !== undefined) try { fs.closeSync(log) } catch {}
@@ -254,7 +252,9 @@ function latestTranscript(sid: string): string {
 
 export function cmdDoctor(): number {
   let bad = 0
-  for (const c of ["codex", "flock", "setsid", "timeout", "tail", "find"]) {
+  // bun first: it is the shebang's interpreter, so without it on the hook PATH
+  // `env` fails before any of our exit-0 handling can run.
+  for (const c of ["bun", "codex", "flock", "setsid", "timeout", "tail", "find"]) {
     if (which(c)) out(`  ok    ${c}`)
     else { out(`  MISS  ${c}`); bad = 1 }
   }

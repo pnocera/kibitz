@@ -633,7 +633,8 @@ check "the help output actually lists subcommands to check" '[ "${#SUBCMDS[@]}" 
 # SUBCMDS is derived from help, so a command wired into the dispatcher but never
 # documented would escape the scan entirely. Compare the two lists directly.
 # Real subcommands only: the help aliases are not things the docs must list.
-mapfile -t DISPATCH < <(sed -n 's/^ *case "\([a-z][a-z-]*\)":.*/\1/p' "$PLUG/bin/kibitzer" \
+mapfile -t DISPATCH < <({ sed -n 's/^ *case "\([a-z][a-z-]*\)":.*/\1/p' "$ADV"     # TypeScript
+                          sed -n 's/^  \([a-z][a-z-]*\))  *shift; cmd_.*/\1/p' "$ADV"; } \
                         | grep -vx help | sort -u)
 check "the dispatcher list parsed at all" \
   '[ "${#DISPATCH[@]}" -ge 10 ] && case " ${DISPATCH[*]} " in *" on "*) true ;; *) false ;; esac' \
@@ -673,15 +674,17 @@ check "runtime diagnostics never print a bare kibitz command" \
 # Static and genuinely exhaustive: the whole source, not just echo/printf lines.
 # Gating on those missed heredocs -- cmd_install's guidance block and usage() are
 # both `cat <<EOF`, and a stale command in either would have passed.
+SRCFILES=("$PLUG/bin/kibitzer")
+for f in "$PLUG"/src/*.ts; do [ -f "$f" ] && SRCFILES+=("$f"); done
 stalesrc="$(grep -nE "(^|[^-a-zA-Z0-9_/])kibitz ($SUBRE)([^a-zA-Z0-9-]|\$)" \
-            "$PLUG/bin/kibitzer" || true)"
+            "${SRCFILES[@]}" || true)"
 check "no message anywhere in the source names a bare kibitz command" \
   '[ -z "$stalesrc" ]' "$stalesrc"
 # Diagnostic labels only, and deliberately not the help title: usage() opens with
 # `kibitz — Codex as a…`, which is the product name, not something to type. The
 # command-shaped scans above cannot see a label like `kibitz  <cwd>`, because two
 # spaces stop `kibitz ` from being followed by a word.
-badlabel="$(grep -nE "(echo|printf) +[\"']kibitz[^e]" "$PLUG/bin/kibitzer" || true)"
+badlabel="$(grep -nE "(echo|printf|out|err|write)\(? *[\"\`']kibitz[^e]" "${SRCFILES[@]}" || true)"
 check "no echo/printf diagnostic label uses the shadowed name" \
   '[ -z "$badlabel" ]' "$badlabel"
 

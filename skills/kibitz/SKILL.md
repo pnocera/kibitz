@@ -69,5 +69,6 @@ reading like a review gate, that is a defect — `kibitzer lint <file>` checks f
   completes, not during the turn that triggered it.
 - Ordinary edits are debounced (`ADVISOR_MIN_INTERVAL`, default 45s). A failed tool call and the
   end of a turn always trigger a cycle immediately.
-- `kibitzer doctor` checks dependencies.
+- `kibitzer doctor` checks dependencies. It needs Bun on the PATH: that is the shebang's
+  interpreter, so a missing Bun breaks hooks before kibitz can handle it.
 - A failed cycle is reported by `kibitzer status`; full detail in the session's `worker.log`.

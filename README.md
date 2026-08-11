@@ -53,7 +53,11 @@ directory.
 
 To update: `npx skills update -g`.
 
-Requires `codex` (tested on codex-cli 0.147.0), `jq`, and coreutils.
+Requires [Bun](https://bun.sh), `codex` (tested on codex-cli 0.147.0), and coreutils.
+
+**Bun must be on the PATH Claude Code gives its hooks.** It is the interpreter in the
+executable's shebang, so without it a hook fails before any of kibitz's own error handling
+runs. `kibitzer doctor` checks for it first.
 
 <details>
 <summary>Registering hooks by hand instead</summary>
@@ -118,7 +122,13 @@ turn.
 ## Design notes
 
 **Hooks never block.** Every hook is a file append or a file read, always exits 0, and spawns work
-with `setsid`. A hook that waited on Codex would freeze the session.
+with `setsid`. A hook that waited on Codex would freeze the session. Measured cost: ~23 ms idle,
+~48 ms when it delivers, against Claude Code's 2 s budget.
+
+**TypeScript on Bun.** It replaced 927 lines of shell, and is faster on the hot path than the shell
+was — the shell paid a `jq` subprocess per field per record. Most defects this code has had were
+shell-shaped: `case` alternation that silently never matched, `IFS` collapsing empty fields, `$?`
+read after the wrong command, `grep -q` with `pipefail`.
 
 **One record per file, published by atomic rename.** Claude runs matching hooks in parallel and a
 turn can issue parallel tool calls, so several producers write at once. A shared append-only file
