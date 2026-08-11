@@ -79,13 +79,19 @@ export function writeAtomic(target: string, data: string) {
 
 /** Durable append. The delivery ledger must survive a host crash, or the
  *  documented failure mode (lose an advisory, never duplicate one) is a fiction. */
-export function appendSync(p: string, line: string) {
+export function appendSync(p: string, line: string): boolean {
   let fd: number | undefined
   try {
     fd = fs.openSync(p, "a")
     fs.writeSync(fd, line)
     fs.fsyncSync(fd)
-  } catch { /* best effort */ } finally { if (fd !== undefined) try { fs.closeSync(fd) } catch {} }
+    return true
+  } catch {
+    // Report it. Swallowing this breaks the whole delivery contract: the caller
+    // would emit an advisory that no durable ledger records, and a later
+    // consumer would deliver it again -- duplicating instead of losing.
+    return false
+  } finally { if (fd !== undefined) try { fs.closeSync(fd) } catch {} }
 }
 
 export const listJson = (dir: string): string[] => {

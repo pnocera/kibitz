@@ -95,6 +95,14 @@ function handle(line: string) {
 
 let warnedUnbound = false
 
+/** A session id becomes a path segment in sessDir, so neither the environment
+ *  override nor a registry record may contain separators or traversal. The
+ *  registry is the automatic path and gets the same check: a malformed or stale
+ *  record naming "../../elsewhere" would otherwise consume and ledger another
+ *  subtree entirely. */
+const validSid = (v: unknown): v is string =>
+  typeof v === "string" && /^[A-Za-z0-9._-]+$/.test(v) && v !== "." && v !== ".."
+
 /** The session this channel belongs to, established rather than guessed.
  *
  *  Claude Code registers each session at ~/.claude/sessions/<pid>.json with its
@@ -107,7 +115,16 @@ let warnedUnbound = false
  *  wrong-recipient failure this has to prevent. With no binding we decline and
  *  let the hook drain deliver, which is always correct if less immediate. */
 function boundSession(): string | null {
-  if (process.env.KIBITZ_SESSION) return process.env.KIBITZ_SESSION
+  const forced = process.env.KIBITZ_SESSION
+  if (forced) {
+    // Validated before it becomes a path segment: sessDir appends it directly,
+    // so `../…` would point this consumer at a different state subtree.
+    if (validSid(forced)) return forced
+    if (!warnedUnbound) {
+      warnedUnbound = true
+      process.stderr.write(`kibitzer channel: KIBITZ_SESSION is not a valid session id; ignoring it.\n`)
+    }
+  }
   // CLAUDE_CONFIG_DIR relocates the whole config, including this registry, and
   // the plugin smoke test already runs that way.
   const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude")
@@ -125,8 +142,7 @@ function boundSession(): string | null {
         const live = procStart(pid)
         const same = j?.procStart === undefined || String(j.procStart) === String(live)
         const rightPid = j?.pid === undefined || Number(j.pid) === pid
-        if (typeof j?.sessionId === "string" && j.sessionId && same && rightPid)
-          return j.sessionId
+        if (validSid(j?.sessionId) && same && rightPid) return j.sessionId
       } catch {}
     }
     const stat = read(`/proc/${pid}/stat`)
@@ -177,7 +193,9 @@ function drainOnce(cwd: string) {
 
     // Ledger before emit, exactly as the hook drain does: the two consumers
     // share one record of what has been delivered, so neither repeats the other.
-    appendSync(ledgerPath, `${a.id}\n`)
+    // Fail closed: without a durable ledger entry a later consumer would
+    // deliver this again, which is the one outcome the contract forbids.
+    if (!appendSync(ledgerPath, `${a.id}\n`)) { rm(claimed); continue }
     delivered.add(a.id)
 
     let body = `- ${a.kind ? `[${flat(a.kind)}] ` : ""}${flat(a.note)}\n`

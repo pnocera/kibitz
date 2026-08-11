@@ -627,6 +627,32 @@ plant chan-reg "bound through the registry"
 check "Claude's session registry binds the channel without configuration" \
   'grep >/dev/null "bound through the registry" "$WORK/chanreg.out"' "$(cat "$WORK/chanreg.out")"
 
+# The override becomes a path segment, so traversal must be refused outright.
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+plant chan-trav "must not escape the session subtree"
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_SESSION="../../elsewhere" \
+      KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+  >"$WORK/chantrav.out" 2>"$WORK/chantrav.err"
+check "a traversal in KIBITZ_SESSION is refused" \
+  'grep >/dev/null "not a valid session id" "$WORK/chantrav.err"' "$(cat "$WORK/chantrav.err")"
+ESCAPED="$(find "$ADVISOR_STATE_ROOT" -maxdepth 4 -name elsewhere 2>/dev/null)"
+check "and nothing was created outside the project subtree" '[ -z "$ESCAPED" ]' "$ESCAPED"
+
+# The registry is the automatic path, so it gets the same validation.
+jq -n --argjson p "$$" --arg st "$PROCSTART" \
+  '{sessionId:"../../elsewhere", pid:$p, procStart:$st}' >"$EMPTYHOME/.claude/sessions/$$.json"
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+plant chan-badreg "must not bind through a traversing record"
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+  >"$WORK/chanbadreg.out" 2>/dev/null
+check "a traversing sessionId in the registry is refused too" \
+  '! grep >/dev/null "must not bind through a traversing record" "$WORK/chanbadreg.out"' \
+  "$(cat "$WORK/chanbadreg.out")"
+jq -n --arg s "$SID" --argjson p "$$" --arg st "$PROCSTART" \
+  '{sessionId:$s, pid:$p, procStart:$st}' >"$EMPTYHOME/.claude/sessions/$$.json"
+
 # A stale record whose pid the kernel reused must not bind: same wrong-recipient
 # failure, reached from the other direction.
 jq -n --arg s "$SID" --argjson p "$$" --arg st "999999999" \

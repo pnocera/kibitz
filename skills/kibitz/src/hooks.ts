@@ -69,7 +69,9 @@ function drain(cwd: string, sid: string, event: string): string | null {
 
     // Ledger BEFORE emit, durably: we fail toward loss, never toward duplicate
     // delivery, and that only holds if the record survives a crash.
-    appendSync(ledgerPath, `${a.id}\n`)
+    // Fail closed: without a durable ledger entry a later consumer would
+    // deliver this again, which is the one outcome the contract forbids.
+    if (!appendSync(ledgerPath, `${a.id}\n`)) { rm(claimed); continue }
     delivered.add(a.id)
 
     body += `- ${a.kind ? `[${flat(a.kind)}] ` : ""}${flat(a.note)}\n`

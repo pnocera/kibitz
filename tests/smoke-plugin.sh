@@ -64,26 +64,47 @@ fi
 # launched with the development-channel flag. Unit tests can prove the queue
 # logic and the .mcp.json shape, but not that Claude discovers and launches it.
 if [ "${SMOKE_CHANNEL:-0}" = "1" ]; then
-  echo "smoke: channel phase — queueing one advisory and watching for a push…"
+  echo "smoke: channel phase — starting a session, then seeding ITS queue…"
   SD="$STATE/projects/$H/sessions"
-  SID_DIR="$(find "$SD" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
-  if [ -n "$SID_DIR" ]; then
-    EP="$(cut -d' ' -f2 "$STATE/projects/$H/state")"
-    mkdir -p "$SID_DIR/outbox"
-    printf '{"id":"smoke-chan","epoch":%s,"kind":"smoke","note":"channel smoke advisory","why_it_matters":"t","evidence":"","confidence":0.5}' \
-      "$EP" >"$SID_DIR/outbox/1-smoke.json"
-    ( cd "$PROJ" && CLAUDE_CONFIG_DIR="$CFG" ADVISOR_STATE_ROOT="$STATE" \
-        timeout 180 claude -p "Reply with the word ACK." \
-        --dangerously-load-development-channels "server:kibitz" \
-        --permission-mode bypassPermissions >"$PROJ/chan.txt" 2>&1 )
-    if [ -z "$(find "$SID_DIR/outbox" -name '1-smoke.json' 2>/dev/null)" ]; then
-      echo "smoke: channel PASS — the advisory was claimed by the channel"
-    else
-      echo "smoke: channel FAIL — still queued, so the channel never ran." >&2
-      echo "  Claude may not have registered it. Check the startup notice and /mcp." >&2
-      sed -n '1,15p' "$PROJ/chan.txt" >&2
-      exit 1
-    fi
+  before="$(ls "$SD" 2>/dev/null | sort | tr '\n' ' ')"
+  # The channel binds to the session that owns it, so the advisory has to be
+  # queued for that session -- seeding an earlier session's outbox proves
+  # nothing, and would fail even when loading works correctly.
+  ( cd "$PROJ" && CLAUDE_CONFIG_DIR="$CFG" ADVISOR_STATE_ROOT="$STATE" \
+      timeout 180 claude -p "Run this bash command: sleep 40" \
+      --dangerously-load-development-channels "server:kibitz" \
+      --permission-mode bypassPermissions >"$PROJ/chan.txt" 2>&1 ) &
+  CLAUDE_PID=$!
+  NEWSID=""
+  for _ in $(seq 1 120); do
+    for d in $(ls "$SD" 2>/dev/null); do
+      case " $before " in *" $d "*) ;; *) NEWSID="$d"; break ;; esac
+    done
+    [ -n "$NEWSID" ] && break
+    sleep 0.5
+  done
+  if [ -z "$NEWSID" ]; then
+    echo "smoke: channel FAIL — no new session appeared; hooks did not run." >&2
+    kill "$CLAUDE_PID" 2>/dev/null; exit 1
+  fi
+  EP="$(cut -d' ' -f2 "$STATE/projects/$H/state")"
+  mkdir -p "$SD/$NEWSID/outbox"
+  printf '{"id":"smoke-chan","epoch":%s,"kind":"smoke","note":"channel smoke advisory","why_it_matters":"t","evidence":"","confidence":0.5}' \
+    "$EP" >"$SD/$NEWSID/outbox/1-smoke.json"
+  echo "smoke: queued for session $NEWSID; waiting for the channel to claim it…"
+  claimed=0
+  for _ in $(seq 1 120); do
+    [ -f "$SD/$NEWSID/outbox/1-smoke.json" ] || { claimed=1; break; }
+    sleep 0.5
+  done
+  kill "$CLAUDE_PID" 2>/dev/null; wait "$CLAUDE_PID" 2>/dev/null
+  if [ "$claimed" = "1" ] && grep -q '^smoke-chan$' "$SD/$NEWSID/ledger" 2>/dev/null; then
+    echo "smoke: channel PASS — the channel claimed and ledgered the advisory"
+  else
+    echo "smoke: channel FAIL — the advisory was never claimed by the channel." >&2
+    echo "  Claude may not have registered it; check the startup notice and /mcp." >&2
+    sed -n '1,15p' "$PROJ/chan.txt" >&2
+    exit 1
   fi
 fi
 
