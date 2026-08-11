@@ -136,8 +136,11 @@ turn can issue parallel tool calls, so several producers write at once. A shared
 would interleave.
 
 **Delivery is deliberately asymmetric.** `outbox/` (worker → Claude) is *best effort*, because
-Claude never acknowledges receiving injected context. The delivery ledger is written and flushed
-*before* the emit, so a crash loses an advisory rather than duplicating one. **The advisor promises
+Claude never acknowledges receiving injected context. Delivery is committed *before* the emit — by
+creating a per-id marker with `O_EXCL`, which exactly one consumer can do whatever the timing — so a
+crash loses an advisory rather than duplicating one. This is also why `status` says *claimed* rather
+than *emitted*: the marker records that we took responsibility for an advisory, not that anyone saw
+it. **The advisor promises
 you a complete log and promises Claude nothing** — which is safe precisely because nothing depends
 on Claude receiving any particular advisory.
 
@@ -190,9 +193,10 @@ kibitz is on neither, so the flag above is the way to run it. An administrator w
 `plugin:kibitz@<marketplace>` in managed settings can run it through `--channels` without the
 banner; that route is untested here.
 
-It is a **second consumer of the same queue**, not a replacement. It claims records by the same
-atomic rename and writes the same ledger, so the two can never both deliver one advisory, and
-whichever is running does the work. With no channel loaded nothing changes.
+It is a **second consumer of the same queue**, not a replacement. It takes the same atomic per-id
+claim, and that claim — not the ledger, which is a readable record and may fail to be written — is
+what stops the two ever both delivering one advisory. Whichever is running does the work. With no
+channel loaded nothing changes.
 
 It does not add an acknowledgement. Claude Code does not acknowledge channel notifications, and an
 unregistered or policy-blocked channel drops them silently, so the contract is unchanged: lose
@@ -209,7 +213,7 @@ a wrong-recipient failure, not merely a late delivery. Set `KIBITZ_SESSION` to b
 bash tests/run-tests.sh
 ```
 
-170 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+172 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
 reading, invocation confinement, the plugin package (manifest, hook events, relocatable

@@ -75,6 +75,11 @@ function drain(cwd: string, sid: string, event: string): string | null {
     // The commit point. Fails closed: if we cannot take the claim, someone else
     // owns delivery of this advisory and we must not emit it.
     if (!claimDelivery(d, a.id)) { rm(claimed); continue }
+    // Test seam: lets a test land `off` after the claim is committed and before
+    // the final authorization below -- the window in which an advisory is
+    // counted and never shown, which is why `status` says claimed, not emitted.
+    const cd = process.env.ADVISOR_TEST_CLAIM_DELAY
+    if (cd) Bun.sleepSync(Number(cd) * 1000)
 
     body += `- ${a.kind ? `[${flat(a.kind)}] ` : ""}${flat(a.note)}\n`
     if (a.why_it_matters) body += `  why: ${flat(a.why_it_matters)}\n`

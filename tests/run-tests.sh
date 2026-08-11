@@ -486,6 +486,26 @@ check "and re-enabling does not resurrect it" \
   '[ -z "$(fire PreToolUse)" ]' "a pre-off advisory was delivered after re-enabling"
 "$ADV" off "$WORK" >/dev/null; "$ADV" on "$WORK" >/dev/null
 
+# The reason `status` says "claimed" and not "emitted", made causal rather than
+# asserted: land `off` AFTER the claim is committed and before the final
+# authorization. Nothing is shown, yet the marker exists and is counted. A test
+# that only pins the wording would stay green if this behaviour changed.
+BEFORE="$("$ADV" status "$WORK" | sed -n 's/.*claimed *: \([0-9]*\).*/\1/p')"
+plant id-claimrace "claimed, then off before it is shown"
+CLAIMOUT="$WORK/claimrace.out"
+( hookjson | ADVISOR_TEST_CLAIM_DELAY=0.6 "$ADV" hook PreToolUse >"$CLAIMOUT" 2>/dev/null ) &
+CPID=$!
+sleep 0.2
+"$ADV" off "$WORK" >/dev/null    # lands after the claim, before the emit
+wait "$CPID" 2>/dev/null
+check "off after the claim shows nothing" \
+  '[ ! -s "$CLAIMOUT" ]' "advice escaped after off: $(cat "$CLAIMOUT" 2>/dev/null)"
+"$ADV" on "$WORK" >/dev/null
+check "but the claim is still counted, which is why it is not called emitted" \
+  '[ "$("$ADV" status "$WORK" | sed -n "s/.*claimed *: \([0-9]*\).*/\1/p")" -eq $((BEFORE + 1)) ]' \
+  "claimed went from $BEFORE to $("$ADV" status "$WORK" | sed -n 's/.*claimed *: \([0-9]*\).*/\1/p')"
+"$ADV" off "$WORK" >/dev/null; "$ADV" on "$WORK" >/dev/null
+
 # Delivery is gated on the epoch, not on a lock, so nothing can wedge the hot
 # path: a stale record is dropped and a current one goes out in the same call.
 plant_stale id-stale "written before the operator opted out"
