@@ -160,8 +160,9 @@ check "the claimed count sums markers and legacy ledger lines" \
 # The label must not promise more than the records establish: a marker is
 # written before the final off/epoch check, so `off` in that window leaves a
 # counted advisory that was never shown.
-check "status does not call the count an emission" \
-  '! "$ADV" status "$WORK" | grep -E "emitted|shown|displayed" >/dev/null' \
+check "status calls the count a claim on delivery, not an emission" \
+  '"$ADV" status "$WORK" | grep -E "claimed *: [0-9]+ advisories committed for delivery" >/dev/null &&
+   ! "$ADV" status "$WORK" | grep -E "emitted|shown|displayed|sent|received" >/dev/null' \
   "$("$ADV" status "$WORK")"
 
 plant id-bbb "second advisory"
