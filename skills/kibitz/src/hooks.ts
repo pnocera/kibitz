@@ -7,7 +7,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import {
   BIN, LEASE_SECONDS, MAX_PER_DRAIN, MIN_INTERVAL, SENTINEL,
-  ageMinutes, appendSync, epochOf, initSess, isEnabled, isMuted, isNavigation,
+  ageMinutes, alreadyDelivered, claimDelivery, epochOf, initSess, isEnabled, isMuted, isNavigation,
   isQuiet, isoNow, killTree, listJson, read, readState, rm, sessDir, validSid,
   verifiedWorkerPid,
 } from "./core.ts"
@@ -47,8 +47,8 @@ function drain(cwd: string, sid: string, event: string): string | null {
     if (ageMinutes(f) > LEASE_SECONDS / 60)
       try { fs.renameSync(f, path.join(d, "outbox", path.basename(f))) } catch {}
 
-  const ledgerPath = path.join(d, "ledger")
-  const delivered = new Set((read(ledgerPath) ?? "").split("\n").filter(Boolean))
+  // No in-memory delivered set: it goes stale exactly when it matters, which is
+  // the lease-reclaim window. claimDelivery is the authority.
   let body = ""
   let n = 0
 
@@ -66,14 +66,12 @@ function drain(cwd: string, sid: string, event: string): string | null {
     // it queued must not then receive it.
     if (isMuted(cwd, `${a.kind ?? ""} ${a.note ?? ""}`)) { rm(claimed); continue }
     if (!a.id) { rm(claimed); continue }
-    if (delivered.has(a.id)) { rm(claimed); continue }
 
     // Ledger BEFORE emit, durably: we fail toward loss, never toward duplicate
     // delivery, and that only holds if the record survives a crash.
-    // Fail closed: without a durable ledger entry a later consumer would
-    // deliver this again, which is the one outcome the contract forbids.
-    if (!appendSync(ledgerPath, `${a.id}\n`)) { rm(claimed); continue }
-    delivered.add(a.id)
+    // The commit point. Fails closed: if we cannot take the claim, someone else
+    // owns delivery of this advisory and we must not emit it.
+    if (!claimDelivery(d, a.id)) { rm(claimed); continue }
 
     body += `- ${a.kind ? `[${flat(a.kind)}] ` : ""}${flat(a.note)}\n`
     if (a.why_it_matters) body += `  why: ${flat(a.why_it_matters)}\n`

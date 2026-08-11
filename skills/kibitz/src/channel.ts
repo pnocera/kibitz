@@ -29,7 +29,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import {
   LEASE_SECONDS, MAX_PER_DRAIN, SENTINEL,
-  ageMinutes, appendSync, epochOf, isEnabled, isMuted, isQuiet,
+  ageMinutes, alreadyDelivered, claimDelivery, epochOf, isEnabled, isMuted, isQuiet,
   listJson, procStart, read, rm, sessDir, validSid,
 } from "./core.ts"
 
@@ -93,8 +93,6 @@ function handle(line: string) {
 
 // --- the outbox consumer ----------------------------------------------------
 
-let warnedUnbound = false
-
 /** The session this channel belongs to, established rather than guessed.
  *
  *  Claude Code registers each session at ~/.claude/sessions/<pid>.json with its
@@ -106,19 +104,44 @@ let warnedUnbound = false
  *  the old channel then claims the newer session's advisory -- exactly the
  *  wrong-recipient failure this has to prevent. With no binding we decline and
  *  let the hook drain deliver, which is always correct if less immediate. */
+let warnedUnbound = false
+
 function boundSession(): string | null {
   const forced = process.env.KIBITZ_SESSION
-  if (forced) {
-    // Validated before it becomes a path segment: sessDir appends it directly,
-    // so `../…` would point this consumer at a different state subtree.
-    if (validSid(forced)) return forced
-    if (!warnedUnbound) {
-      warnedUnbound = true
-      process.stderr.write(`kibitzer channel: KIBITZ_SESSION is not a valid session id; ignoring it.\n`)
+  const derived = registrySession()
+
+  if (forced !== undefined && forced !== "") {
+    if (!validSid(forced)) {
+      warnOnce("KIBITZ_SESSION is not a valid session id; ignoring it.")
+    } else if (derived && forced !== derived) {
+      // An override may fill a gap, never contradict the evidence. A stale or
+      // inherited value naming session B, used by a channel that actually
+      // belongs to session A, would drain B's queue and emit it into A -- the
+      // cross-session misdelivery this binding exists to prevent. Validation
+      // stops a path escape; only this stops a wrong recipient.
+      warnOnce(`KIBITZ_SESSION names ${forced} but this channel belongs to ${derived}; ` +
+        "ignoring the override.")
+      return derived
+    } else {
+      return forced
     }
   }
-  // CLAUDE_CONFIG_DIR relocates the whole config, including this registry, and
-  // the plugin smoke test already runs that way.
+  if (derived) return derived
+  warnOnce("could not establish which Claude session this belongs to, so it will not push. " +
+    "The hook drain still delivers on the next tool call. Set KIBITZ_SESSION to bind explicitly.")
+  return null
+}
+
+function warnOnce(msg: string) {
+  if (warnedUnbound) return
+  warnedUnbound = true
+  process.stderr.write(`kibitzer channel: ${msg}\n`)
+}
+
+/** The session this channel serves, from its own ancestry against Claude's
+ *  session registry: a channel is a subprocess of the Claude that owns it, so
+ *  this is evidence rather than inference. */
+function registrySession(): string | null {
   const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude")
   const reg = path.join(cfg, "sessions")
   let pid = process.pid
@@ -127,19 +150,13 @@ function boundSession(): string | null {
     if (rec) {
       try {
         const j = JSON.parse(rec)
-        // Identity, not just a filename: a stale record whose pid the kernel has
-        // reused would otherwise bind this channel to a dead session -- the same
-        // wrong-recipient failure, arrived at from the other direction. The
-        // registry stores procStart precisely so this can be checked.
         // Both identity fields are REQUIRED. Treating a missing field as
-        // agreement would bind on the filename alone, which is exactly the
-        // pid-reuse case this check exists to stop. The live registry always
-        // records both, so demanding them costs nothing real.
+        // agreement would bind on the filename alone, which is the pid-reuse
+        // case this check exists to stop; the live registry records both.
         const live = procStart(pid)
         const sameStart = j?.procStart !== undefined && live !== null &&
           String(j.procStart) === String(live)
-        const samePid = Number(j?.pid) === pid
-        if (validSid(j?.sessionId) && sameStart && samePid) return j.sessionId
+        if (validSid(j?.sessionId) && sameStart && Number(j?.pid) === pid) return j.sessionId
       } catch {}
     }
     const stat = read(`/proc/${pid}/stat`)
@@ -148,15 +165,12 @@ function boundSession(): string | null {
     if (!Number.isInteger(ppid) || ppid <= 1) break
     pid = ppid
   }
-  if (!warnedUnbound) {
-    warnedUnbound = true
-    process.stderr.write(
-      "kibitzer channel: could not establish which Claude session this belongs to, so it will " +
-      "not push. The hook drain still delivers on the next tool call. Set KIBITZ_SESSION to " +
-      "bind explicitly.\n")
-  }
   return null
 }
+
+// --- the outbox consumer ----------------------------------------------------
+
+
 
 function drainOnce(cwd: string) {
   if (!ready) return                 // not through MCP initialization yet
@@ -165,8 +179,8 @@ function drainOnce(cwd: string) {
   if (!sid) return
   const d = sessDir(cwd, sid)
   const nowEpoch = epochOf(cwd)
-  const ledgerPath = path.join(d, "ledger")
-  const delivered = new Set((read(ledgerPath) ?? "").split("\n").filter(Boolean))
+  // No in-memory delivered set: it goes stale exactly when it matters, which is
+  // the lease-reclaim window. claimDelivery is the authority.
 
   // Reclaim records whose claiming consumer died holding them. Without this a
   // channel killed between the rename and the notification strands an advisory
@@ -186,14 +200,13 @@ function drainOnce(cwd: string) {
     try { a = JSON.parse(read(claimed) ?? "") } catch { rm(claimed); continue }
     if (String(a.epoch ?? 0) !== nowEpoch) { rm(claimed); continue }
     if (isMuted(cwd, `${a.kind ?? ""} ${a.note ?? ""}`)) { rm(claimed); continue }
-    if (!a.id || delivered.has(a.id)) { rm(claimed); continue }
+    if (!a.id || alreadyDelivered(d, a.id)) { rm(claimed); continue }
 
     // Ledger before emit, exactly as the hook drain does: the two consumers
     // share one record of what has been delivered, so neither repeats the other.
-    // Fail closed: without a durable ledger entry a later consumer would
-    // deliver this again, which is the one outcome the contract forbids.
-    if (!appendSync(ledgerPath, `${a.id}\n`)) { rm(claimed); continue }
-    delivered.add(a.id)
+    // The commit point. Fails closed: if we cannot take the claim, someone else
+    // owns delivery of this advisory and we must not emit it.
+    if (!claimDelivery(d, a.id)) { rm(claimed); continue }
 
     let body = `- ${a.kind ? `[${flat(a.kind)}] ` : ""}${flat(a.note)}\n`
     if (a.why_it_matters) body += `  why: ${flat(a.why_it_matters)}\n`

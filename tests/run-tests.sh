@@ -126,6 +126,20 @@ plant id-aaa "first advisory"
 check "no duplicate delivery: a replayed record is dropped, not re-emitted" \
   '[ -z "$(fire PreToolUse)" ]' "ledger did not suppress a replay"
 
+# Delivery is committed by an atomic per-id marker, not by reading the ledger and
+# then appending to it. Those two steps are not atomic, and the lease makes the
+# gap reachable: a consumer paused after claiming loses the record to a reclaim,
+# the second consumer delivers, and the first resumes and delivers it again.
+plant id-marker "must not be delivered twice"
+out="$(fire PreToolUse)"
+check "delivery creates a per-id marker, not just a ledger line" \
+  '[ -n "$(find "$(sdir)/delivered" -type f 2>/dev/null)" ]' "$(ls "$(sdir)/delivered" 2>/dev/null)"
+# Remove the ledger text but keep the marker: a resumed consumer with a stale
+# view must still be refused, which a ledger-text check alone would not do.
+: >"$(sdir)/ledger"
+plant id-marker "must not be delivered twice"
+check "the marker alone prevents a second delivery" '[ -z "$(fire PreToolUse)" ]'
+
 plant id-bbb "second advisory"
 plant id-ccc "third advisory"
 plant id-ddd "fourth advisory"
@@ -573,6 +587,10 @@ echo "the channel (optional transport)"
 # No `head` in the pipeline: it SIGPIPEs the server and pipefail then reports
 # failure even when the assertion holds.
 rpc() { printf '%s\n' "$1" | timeout 5 "$ADV" channel 2>/dev/null | sed -n 1p; }
+# An override only fills a gap: with a real Claude ancestry the registry wins, by
+# design. These runs therefore use a HOME with no session registry, which is the
+# documented situation for KIBITZ_SESSION.
+NOREG="$WORK/noreg"; mkdir -p "$NOREG"
 INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
 check "declares the claude/channel capability" \
   '[ "$(rpc "$INIT" | jq -c ".result.capabilities.experimental")" = "{\"claude/channel\":{}}" ]' \
@@ -593,7 +611,7 @@ check "the channel resolves its binary through CLAUDE_PLUGIN_ROOT" \
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-1 "advice for the channel"
 ( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 3 ) \
-  | ( cd "$WORK" && KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+  | ( cd "$WORK" && HOME="$NOREG" KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
   >"$WORK/chan.out" 2>/dev/null
 check "the channel emits a channel notification for a pending advisory" \
   'grep >/dev/null "notifications/claude/channel" "$WORK/chan.out"' "$(cat "$WORK/chan.out")"
@@ -676,6 +694,19 @@ check "a traversing sessionId in the registry is refused too" \
 jq -n --arg s "$SID" --argjson p "$$" --arg st "$PROCSTART" \
   '{sessionId:$s, pid:$p, procStart:$st}' >"$EMPTYHOME/.claude/sessions/$$.json"
 
+# An override may fill a gap, never contradict the evidence. A stale or inherited
+# value naming another session would drain that session's queue into this one.
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+plant chan-conflict "belongs to the bound session"
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_SESSION="a-different-session" \
+      KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+  >"$WORK/chanconf.out" 2>"$WORK/chanconf.err"
+check "an override that contradicts the registry is ignored" \
+  'grep >/dev/null "ignoring the override" "$WORK/chanconf.err"' "$(cat "$WORK/chanconf.err")"
+check "and the registry binding is used instead" \
+  'grep >/dev/null "belongs to the bound session" "$WORK/chanconf.out"' "$(cat "$WORK/chanconf.out")"
+
 # A stale record whose pid the kernel reused must not bind: same wrong-recipient
 # failure, reached from the other direction.
 jq -n --arg s "$SID" --argjson p "$$" --arg st "999999999" \
@@ -708,7 +739,7 @@ find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-off "must not be pushed after off"
 ( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'
   sleep 0.4; ( cd "$WORK" && "$ADV" off "$WORK" >/dev/null ); sleep 2 ) \
-  | ( cd "$WORK" && KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=1000 timeout 6 "$ADV" channel ) \
+  | ( cd "$WORK" && HOME="$NOREG" KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=1000 timeout 6 "$ADV" channel ) \
   >"$WORK/chanoff.out" 2>/dev/null
 check "off stops the channel pushing, as it stops the hook drain" \
   '! grep >/dev/null "must not be pushed after off" "$WORK/chanoff.out"' \

@@ -3,6 +3,7 @@
 // `state` line, same ledger. An upgrade must not orphan a live installation.
 
 import { spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -108,6 +109,56 @@ export function appendSync(p: string, line: string): boolean {
     // consumer would deliver it again -- duplicating instead of losing.
     return false
   } finally { if (fd !== undefined) try { fs.closeSync(fd) } catch {} }
+}
+
+/** Claim the right to deliver one advisory, atomically and across processes.
+ *
+ *  Reading the ledger and then appending to it is not atomic, and the lease
+ *  makes that gap reachable: a consumer paused after claiming a record loses it
+ *  to a reclaim after LEASE_SECONDS, the second consumer delivers, and the first
+ *  then resumes with a stale in-memory view and delivers the same advisory
+ *  again. O_EXCL creation of a per-id marker is the commit point instead --
+ *  exactly one caller can create it, whatever the timing.
+ *
+ *  The human-readable ledger is still appended, because it is what `status`
+ *  counts and what an operator reads. */
+export function claimDelivery(sessionDir: string, id: string): boolean {
+  // The id is now a filename, which it never was while the ledger was only text.
+  // A corrupt or planted record naming "../../x" would otherwise write outside
+  // the marker directory, so it is hashed rather than trusted.
+  const dir = path.join(sessionDir, "delivered")
+  mkdirp(dir)
+  let fd: number | undefined
+  try {
+    fd = fs.openSync(path.join(dir, markerName(id)), "wx")   // wx: fails if it exists
+    fs.fsyncSync(fd)
+  } catch {
+    return false                                  // someone else owns delivery
+  } finally { if (fd !== undefined) try { fs.closeSync(fd) } catch {} }
+  // Persist the name itself, not just the file's contents: an unsynced
+  // directory entry can vanish across a power loss, and the marker IS the claim.
+  let dfd: number | undefined
+  try { dfd = fs.openSync(dir, "r"); fs.fsyncSync(dfd) } catch {} finally {
+    if (dfd !== undefined) try { fs.closeSync(dfd) } catch {}
+  }
+  // The ledger is what `status` counts and an operator reads. If it cannot be
+  // written the claim still stands -- undoing it would risk a duplicate, which
+  // is worse -- but say so rather than report a silent success.
+  if (!appendSync(path.join(sessionDir, "ledger"), `${id}\n`))
+    process.stderr.write(`kibitzer: delivered ${id} but could not append the ledger\n`)
+  return true
+}
+
+const markerName = (id: string) =>
+  createHash("sha1").update(id).digest("hex")
+
+export function alreadyDelivered(sessionDir: string, id: string): boolean {
+  if (exists(path.join(sessionDir, "delivered", markerName(id)))) return true
+  // Upgrade path: an installation delivered by the previous version has ledger
+  // lines and no markers. Without this a queued record it had already delivered
+  // would go out a second time on the first drain after updating.
+  const led = read(path.join(sessionDir, "ledger"))
+  return led !== null && led.split("\n").includes(id)
 }
 
 export const listJson = (dir: string): string[] => {
