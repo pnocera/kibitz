@@ -53,7 +53,8 @@ directory.
 
 To update: `npx skills update -g`.
 
-Requires [Bun](https://bun.sh), `codex` (tested on codex-cli 0.147.0), and coreutils.
+Requires [Bun](https://bun.sh) (tested on 1.3.14, which is what CI pins), `codex` (tested on
+codex-cli 0.147.0), and coreutils.
 
 **Bun must be on the PATH Claude Code gives its hooks.** It is the interpreter in the
 executable's shebang, so without it a hook fails before any of kibitz's own error handling
