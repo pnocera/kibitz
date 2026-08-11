@@ -60,6 +60,33 @@ EOF
   exit 1
 fi
 
+# Optional second phase: the channel, which only registers when Claude is
+# launched with the development-channel flag. Unit tests can prove the queue
+# logic and the .mcp.json shape, but not that Claude discovers and launches it.
+if [ "${SMOKE_CHANNEL:-0}" = "1" ]; then
+  echo "smoke: channel phase — queueing one advisory and watching for a push…"
+  SD="$STATE/projects/$H/sessions"
+  SID_DIR="$(find "$SD" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
+  if [ -n "$SID_DIR" ]; then
+    EP="$(cut -d' ' -f2 "$STATE/projects/$H/state")"
+    mkdir -p "$SID_DIR/outbox"
+    printf '{"id":"smoke-chan","epoch":%s,"kind":"smoke","note":"channel smoke advisory","why_it_matters":"t","evidence":"","confidence":0.5}' \
+      "$EP" >"$SID_DIR/outbox/1-smoke.json"
+    ( cd "$PROJ" && CLAUDE_CONFIG_DIR="$CFG" ADVISOR_STATE_ROOT="$STATE" \
+        timeout 180 claude -p "Reply with the word ACK." \
+        --dangerously-load-development-channels "server:kibitz" \
+        --permission-mode bypassPermissions >"$PROJ/chan.txt" 2>&1 )
+    if [ -z "$(find "$SID_DIR/outbox" -name '1-smoke.json' 2>/dev/null)" ]; then
+      echo "smoke: channel PASS — the advisory was claimed by the channel"
+    else
+      echo "smoke: channel FAIL — still queued, so the channel never ran." >&2
+      echo "  Claude may not have registered it. Check the startup notice and /mcp." >&2
+      sed -n '1,15p' "$PROJ/chan.txt" >&2
+      exit 1
+    fi
+  fi
+fi
+
 n=$(find "$STATE/projects/$H/sessions" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
 if [ "$n" -ge 1 ]; then
   echo "smoke: PASS — plugin hooks fired from the installed layout ($n session)"

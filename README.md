@@ -202,7 +202,10 @@ reading, invocation confinement, the plugin package (manifest, hook events, relo
 upgrade from the two-file state layout, epoch boundaries across off/on, mute at both publication and
 delivery, the channel's MCP handshake and its parity with the hook drain, and hot-path latency.
 
-`tests/smoke-plugin.sh` is separate and opt-in: it installs into the real layout, starts a headless
+`tests/smoke-plugin.sh` is separate and opt-in, and `SMOKE_CHANNEL=1` adds a second phase that
+queues an advisory and checks a real Claude launched with the development-channel flag actually
+claims it — the unit tests can prove the queue logic and the `.mcp.json` shape, but not that Claude
+discovers and launches the channel. The base phase: it installs into the real layout, starts a headless
 Claude Code, and asserts a hook actually fired. It needs an authenticated CLI and a couple of
 minutes, so CI cannot run it — but the JSON-shape tests never cross the loader boundary, and this
 package has already shipped one install that validated perfectly and loaded nothing.
