@@ -140,6 +140,14 @@ check "delivery creates a per-id marker, not just a ledger line" \
 plant id-marker "must not be delivered twice"
 check "the marker alone prevents a second delivery" '[ -z "$(fire PreToolUse)" ]'
 
+# Upgrade path: the previous version recorded deliveries in the ledger only.
+# Both consumers must honour that, or the first drain after an update re-emits.
+rm -rf "$(sdir)/delivered"
+printf 'legacy-delivered\n' >"$(sdir)/ledger"
+plant legacy-delivered "delivered by the previous version"
+check "a ledger-only delivery is honoured after upgrading" \
+  '[ -z "$(fire PreToolUse)" ]' "re-emitted an advisory the old version delivered"
+
 plant id-bbb "second advisory"
 plant id-ccc "third advisory"
 plant id-ddd "fourth advisory"

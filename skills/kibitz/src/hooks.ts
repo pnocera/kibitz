@@ -65,7 +65,10 @@ function drain(cwd: string, sid: string, event: string): string | null {
     // Mutes apply at delivery too: an operator who mutes a topic after seeing
     // it queued must not then receive it.
     if (isMuted(cwd, `${a.kind ?? ""} ${a.note ?? ""}`)) { rm(claimed); continue }
-    if (!a.id) { rm(claimed); continue }
+    // alreadyDelivered, not just the marker: an installation upgraded from the
+    // ledger-only version has ledger lines and no markers, and without this the
+    // first drain after updating re-emits what the old code already delivered.
+    if (!a.id || alreadyDelivered(d, a.id)) { rm(claimed); continue }
 
     // Ledger BEFORE emit, durably: we fail toward loss, never toward duplicate
     // delivery, and that only holds if the record survives a crash.
