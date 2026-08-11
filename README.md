@@ -175,6 +175,15 @@ flag:
 claude --dangerously-load-development-channels server:kibitz
 ```
 
+That flag prints a **WARNING: Loading development channels** banner naming `server:kibitz`. This is
+expected and is not an error — it is the consent notice for the flag, and the channel loads.
+
+The banner cannot be avoided by using `--channels` instead. `server:` entries always require the
+development flag, and without it the entry is **skipped silently**: Claude starts with no channel and
+says nothing. `--channels` only accepts `plugin:<name>@<marketplace>`, against an allowlist that is
+either Anthropic's own or `allowedChannelPlugins` in *managed* settings — neither of which a
+third-party plugin is on. So the flag above is the only way to run this channel.
+
 It is a **second consumer of the same queue**, not a replacement. It claims records by the same
 atomic rename and writes the same ledger, so the two can never both deliver one advisory, and
 whichever is running does the work. With no channel loaded nothing changes.
