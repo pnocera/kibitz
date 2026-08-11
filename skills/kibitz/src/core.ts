@@ -143,18 +143,22 @@ export function claimDelivery(sessionDir: string, id: string): boolean {
   } catch {
     return false                                  // someone else owns delivery
   } finally { if (fd !== undefined) try { fs.closeSync(fd) } catch {} }
-  // Persist the names, not only the contents: an unsynced directory entry can
-  // vanish across a power loss, and the marker IS the claim. Both records live
-  // under sessionDir -- the ledger directly, the marker one level down in a
+  // The ledger is what an operator reads; the marker above is the claim. Either
+  // record, once durable, suppresses a redelivery -- so one failing is survivable.
+  // Written before any directory is synced, because a sync taken earlier cannot
+  // persist a name created after it.
+  const ledgerWritten = appendSync(path.join(sessionDir, "ledger"), `${id}\n`)
+
+  // Now persist the names, not only the contents: an unsynced directory entry
+  // can vanish across a power loss, and the marker IS the claim. Both records
+  // live under sessionDir -- the ledger directly, the marker one level down in a
   // directory mkdirp may have just created -- so syncing sessionDir is what
   // makes either of them nameable after a crash, and neither counts without it.
   const parentSynced = fsyncDir(sessionDir)
   const markerSynced = fsyncDir(dir) && parentSynced
-  // The ledger is what an operator reads; the marker above is the claim. Either
-  // record, once durable, suppresses a redelivery -- so one failing is survivable.
-  const ledgered = appendSync(path.join(sessionDir, "ledger"), `${id}\n`) && parentSynced
+  const ledgered = ledgerWritten && parentSynced
   if (!ledgered)
-    process.stderr.write(`kibitzer: claimed ${id} but could not append the ledger durably\n`)
+    process.stderr.write(`kibitzer: claimed ${id} but could not record it durably in the ledger\n`)
   // Both failing is not. The marker may exist only in page cache, so a power
   // loss here leaves no durable record that this advisory was ever claimed, and
   // the next consumer would deliver it again. Refusing the claim loses it
