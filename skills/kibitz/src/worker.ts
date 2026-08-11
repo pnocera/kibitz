@@ -8,7 +8,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import {
   ACTIVITY_LINES, BIN, CODEX_TIMEOUT, PROMPT_TMPL, SCHEMA, SENTINEL, TRANSCRIPT_LINES,
-  ageMinutes, append, epochOf, exists, initSess, isEnabled, isMuted, isoNow,
+  ageMinutes, append, appendSync, epochOf, exists, initSess, isEnabled, isMuted, isoNow,
   listJson, read, rm, validSid, writeWorkerPid,
 } from "./core.ts"
 
@@ -199,9 +199,6 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
     if (isMuted(cwd, `${kind} ${note}`)) continue
     const fp = fingerprint(note)
     if (seen.has(fp)) continue                     // said it already
-    seen.add(fp)
-    append(seenPath, fp + "\n")
-    append(path.join(d, "kinds"), (kind || "unlabelled") + "\n")
 
     const id = randomUUID()
     const rec = {
@@ -210,17 +207,32 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
       evidence: a?.evidence ?? "",
       confidence: typeof a?.confidence === "number" ? a.confidence : 0,
     }
+    // The operator log first, and only then the outbox. We promise the operator
+    // a complete log and promise Claude nothing, so an advisory Claude may see
+    // and the log may not is the one ordering that breaks the promise. If the
+    // log cannot be written, do not publish: an unlogged advisory is worse than
+    // an undelivered one, and it blocks nothing either way.
+    const t = new Date().toTimeString().slice(0, 8)
+    let entry = `\n[${t}] ${kind ? `(${kind})` : ""} ${note}\n`
+    if (rec.why_it_matters) entry += `   why: ${rec.why_it_matters}\n`
+    if (rec.evidence) entry += `   ref: ${rec.evidence}\n`
+    if (!appendSync(path.join(d, "advice.log"), entry)) {
+      append(logPath, `could not log ${id}; not publishing it\n`)
+      continue
+    }
+    // Suppress a repeat only once the advisory is actually in the log. Marking
+    // it seen first turns a transient logging failure into permanent omission:
+    // the advisory is never published, never logged, and deduplicated away for
+    // the rest of the session when the log comes back.
+    seen.add(fp)
+    append(seenPath, fp + "\n")
+    append(path.join(d, "kinds"), (kind || "unlabelled") + "\n")
+
     const tmp = path.join(d, "tmp", `${id}.json`)
     try {
       fs.writeFileSync(tmp, JSON.stringify(rec))
       fs.renameSync(tmp, path.join(d, "outbox", `${Math.floor(Date.now() / 1000)}-${id}.json`))
     } catch { rm(tmp); continue }
-
-    const t = new Date().toTimeString().slice(0, 8)
-    let entry = `\n[${t}] ${kind ? `(${kind})` : ""} ${note}\n`
-    if (rec.why_it_matters) entry += `   why: ${rec.why_it_matters}\n`
-    if (rec.evidence) entry += `   ref: ${rec.evidence}\n`
-    append(path.join(d, "advice.log"), entry)
     n++
   }
   append(logPath, `published ${n} of ${advisories.length}\n`)

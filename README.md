@@ -140,9 +140,8 @@ Claude never acknowledges receiving injected context. Delivery is committed *bef
 creating a per-id marker with `O_EXCL`, which exactly one consumer can do whatever the timing — so a
 crash loses an advisory rather than duplicating one. This is also why `status` says *claimed* rather
 than *emitted*: the marker records that we took responsibility for an advisory, not that anyone saw
-it. **The advisor promises
-you a complete log and promises Claude nothing** — which is safe precisely because nothing depends
-on Claude receiving any particular advisory.
+it. **The advisor promises you a complete log and promises Claude nothing** — which is safe precisely
+because nothing depends on Claude receiving any particular advisory.
 
 **Opt-out is an epoch, not a lock.** `enabled` and an epoch counter live in one file, replaced
 atomically; `off` advances the epoch, every record carries the epoch it was born in, and consumers
@@ -213,7 +212,7 @@ a wrong-recipient failure, not merely a late delivery. Set `KIBITZ_SESSION` to b
 bash tests/run-tests.sh
 ```
 
-172 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+174 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
 reading, invocation confinement, the plugin package (manifest, hook events, relocatable

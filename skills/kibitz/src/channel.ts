@@ -2,9 +2,10 @@
 // a running session instead of waiting for the next tool call.
 //
 // This is a second consumer of the same outbox, not a replacement for it. It
-// claims records exactly as the hook drain does -- atomic rename, ledger before
-// emit -- so the two can never both deliver the same advisory, and whichever is
-// running does the work. With no channel loaded, nothing changes.
+// claims records exactly as the hook drain does -- atomic rename, then the
+// per-id O_EXCL marker that is the commit point -- so the two can never both
+// deliver the same advisory, and whichever is running does the work. With no
+// channel loaded, nothing changes.
 //
 // What it buys: an advisory produced while the session sits idle arrives now,
 // rather than waiting for a tool call that may never come.
@@ -202,10 +203,11 @@ function drainOnce(cwd: string) {
     if (isMuted(cwd, `${a.kind ?? ""} ${a.note ?? ""}`)) { rm(claimed); continue }
     if (!a.id || alreadyDelivered(d, a.id)) { rm(claimed); continue }
 
-    // Ledger before emit, exactly as the hook drain does: the two consumers
-    // share one record of what has been delivered, so neither repeats the other.
-    // The commit point. Fails closed: if we cannot take the claim, someone else
-    // owns delivery of this advisory and we must not emit it.
+    // The commit point, exactly as the hook drain does it: the two consumers
+    // contend for one atomic per-id marker, so neither repeats the other. Fails
+    // closed -- if we cannot take the claim, someone else owns delivery of this
+    // advisory, or no durable record of it could be written, and either way we
+    // must not emit it.
     if (!claimDelivery(d, a.id)) { rm(claimed); continue }
 
     let body = `- ${a.kind ? `[${flat(a.kind)}] ` : ""}${flat(a.note)}\n`

@@ -491,11 +491,18 @@ check "and re-enabling does not resurrect it" \
 # authorization. Nothing is shown, yet the marker exists and is counted. A test
 # that only pins the wording would stay green if this behaviour changed.
 BEFORE="$("$ADV" status "$WORK" | sed -n 's/.*claimed *: \([0-9]*\).*/\1/p')"
+touch "$WORK/claimmark"          # reference for "a marker newer than this"
 plant id-claimrace "claimed, then off before it is shown"
 CLAIMOUT="$WORK/claimrace.out"
-( hookjson | ADVISOR_TEST_CLAIM_DELAY=0.6 "$ADV" hook PreToolUse >"$CLAIMOUT" 2>/dev/null ) &
+( hookjson | ADVISOR_TEST_CLAIM_DELAY=2 "$ADV" hook PreToolUse >"$CLAIMOUT" 2>/dev/null ) &
 CPID=$!
-sleep 0.2
+# Wait for the claim itself, not for a guessed interval: a sleep races the hook
+# on a loaded host, and this test is about a specific ordering, so it must not
+# depend on timing luck.
+for _ in $(seq 1 200); do
+  [ -n "$(find "$(sdir)/delivered" -type f -newer "$WORK/claimmark" 2>/dev/null)" ] && break
+  sleep 0.02
+done
 "$ADV" off "$WORK" >/dev/null    # lands after the claim, before the emit
 wait "$CPID" 2>/dev/null
 check "off after the claim shows nothing" \
@@ -1207,6 +1214,31 @@ PATH="$FAKEBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "operator log records advisories even while injection is quiet" \
   '[ "$(grep -c "captured" "$(sdir)/advice.log")" -ge 2 ]'
 "$ADV" quiet off "$WORK" >/dev/null
+
+# The other half of that promise: if the log cannot be written, nothing is
+# published either. An advisory Claude may see and the log may not is the one
+# ordering that makes "a complete log" false.
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+mv "$(sdir)/advice.log" "$WORK/advice.log.bak"
+mkdir "$(sdir)/advice.log"        # unwritable as a file: appends now fail
+: >"$CAPTURE"; rm -f "$(sdir)/seen"
+wait_idle
+PATH="$FAKEBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
+check "an advisory that cannot be logged is not published" \
+  '[ -z "$(find "$(sdir)/outbox" -name "*.json" 2>/dev/null)" ]' \
+  "published without a log entry: $(find "$(sdir)/outbox" -name '*.json' 2>/dev/null)"
+rmdir "$(sdir)/advice.log"; mv "$WORK/advice.log.bak" "$(sdir)/advice.log"
+
+# ...and the advisory is not deduplicated away by the failed attempt. Marking it
+# seen before the log succeeds turns a transient outage into permanent omission:
+# never published, never logged, and skipped for the rest of the session.
+BEFORE_LOG="$(grep -c "captured" "$(sdir)/advice.log")"
+: >"$CAPTURE"
+wait_idle
+PATH="$FAKEBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
+check "an advisory the log rejected is offered again once the log recovers" \
+  '[ "$(grep -c "captured" "$(sdir)/advice.log")" -gt "$BEFORE_LOG" ]' \
+  "still suppressed after recovery; seen was written before the log"
 
 echo
 echo "hot path"

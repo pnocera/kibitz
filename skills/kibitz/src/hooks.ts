@@ -70,10 +70,11 @@ function drain(cwd: string, sid: string, event: string): string | null {
     // first drain after updating re-emits what the old code already delivered.
     if (!a.id || alreadyDelivered(d, a.id)) { rm(claimed); continue }
 
-    // Ledger BEFORE emit, durably: we fail toward loss, never toward duplicate
-    // delivery, and that only holds if the record survives a crash.
-    // The commit point. Fails closed: if we cannot take the claim, someone else
-    // owns delivery of this advisory and we must not emit it.
+    // The commit point, taken durably BEFORE the emit: we fail toward loss,
+    // never toward duplicate delivery, and that only holds if the record
+    // survives a crash. Fails closed -- if we cannot take the claim, someone
+    // else owns delivery of this advisory, or no durable record of it could be
+    // written, and either way we must not emit it.
     if (!claimDelivery(d, a.id)) { rm(claimed); continue }
     // Test seam: lets a test land `off` after the claim is committed and before
     // the final authorization below -- the window in which an advisory is

@@ -111,6 +111,14 @@ export function appendSync(p: string, line: string): boolean {
   } finally { if (fd !== undefined) try { fs.closeSync(fd) } catch {} }
 }
 
+/** fsync a directory, so a name created in it survives a power loss. */
+function fsyncDir(p: string): boolean {
+  let fd: number | undefined
+  try { fd = fs.openSync(p, "r"); fs.fsyncSync(fd); return true }
+  catch { return false }
+  finally { if (fd !== undefined) try { fs.closeSync(fd) } catch {} }
+}
+
 /** Claim the right to deliver one advisory, atomically and across processes.
  *
  *  Reading the ledger and then appending to it is not atomic, and the lease
@@ -137,15 +145,29 @@ export function claimDelivery(sessionDir: string, id: string): boolean {
   } finally { if (fd !== undefined) try { fs.closeSync(fd) } catch {} }
   // Persist the name itself, not just the file's contents: an unsynced
   // directory entry can vanish across a power loss, and the marker IS the claim.
-  let dfd: number | undefined
-  try { dfd = fs.openSync(dir, "r"); fs.fsyncSync(dfd) } catch {} finally {
-    if (dfd !== undefined) try { fs.closeSync(dfd) } catch {}
+  // The parent too, and not as belt-and-braces: mkdirp may have just created
+  // `delivered`, and syncing a directory whose own entry is not yet on disk
+  // makes the marker inside it no more durable than the directory holding it.
+  const dirSynced = fsyncDir(dir) && fsyncDir(sessionDir)
+  // The ledger is what an operator reads; the marker above is the claim. Either
+  // record, once durable, suppresses a redelivery -- so one failing is survivable.
+  const ledgered = appendSync(path.join(sessionDir, "ledger"), `${id}\n`)
+  if (!ledgered)
+    process.stderr.write(`kibitzer: claimed ${id} but could not append the ledger\n`)
+  // Both failing is not. The marker may exist only in page cache, so a power
+  // loss here leaves no durable record that this advisory was ever claimed, and
+  // the next consumer would deliver it again. Refusing the claim loses it
+  // instead, which is the direction this contract fails in by design.
+  if (!dirSynced && !ledgered) {
+    // Remove the marker too. We are dropping this advisory, so counting it as
+    // committed would make `status` overstate exactly when storage is failing.
+    // If the unlink itself does not persist, the marker returns and suppresses
+    // a redelivery -- still loss, which is the direction we fail in.
+    rm(path.join(dir, markerName(id)))
+    process.stderr.write(`kibitzer: no durable record for ${id}; dropping it rather than ` +
+      "risking a duplicate\n")
+    return false
   }
-  // The ledger is what an operator reads; the marker above is the claim. If the
-  // ledger cannot be written the claim still stands -- undoing it would risk a
-  // duplicate, which is worse -- but say so rather than report a silent success.
-  if (!appendSync(path.join(sessionDir, "ledger"), `${id}\n`))
-    process.stderr.write(`kibitzer: delivered ${id} but could not append the ledger\n`)
   return true
 }
 
