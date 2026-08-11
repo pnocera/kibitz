@@ -4,7 +4,7 @@ jobs:
   acceptance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # kibitzer is Bun TypeScript, so without this every test that runs the
       # binary fails on `env: 'bun': No such file or directory` -- 82 of them.
       # Codex itself is faked inside the suite and is not needed here.

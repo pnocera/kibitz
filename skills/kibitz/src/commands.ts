@@ -8,7 +8,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import {
   BIN, HOME, PROMPT_TMPL, SCHEMA,
-  currentSession, epochOf, exists, isEnabled, listJson, mkdirp, projDir, read,
+  currentSession, deliveredCount, epochOf, exists, isEnabled, listJson, mkdirp, projDir, read,
   killTree, readState, rm, sessDir, verifiedWorkerPid, which, writeState,
 } from "./core.ts"
 
@@ -78,14 +78,9 @@ export function cmdStatus(cwd = process.cwd()): number {
   const pending = listJson(path.join(d, "outbox"))
   process.stdout.write(`  session : ${sid}\n`)
   process.stdout.write(`  pending : ${pending.length} advisories waiting\n`)
-  // Count the markers, which are the delivery commit point. The ledger is the
-  // readable record and can lag it if a write failed, so counting lines there
-  // would undercount exactly when something went wrong.
-  let emitted = 0
-  try { emitted = fs.readdirSync(path.join(d, "delivered")).length } catch {}
-  if (emitted === 0)
-    emitted = (read(path.join(d, "ledger")) ?? "").split("\n").filter(Boolean).length
-  process.stdout.write(`  emitted : ${emitted} delivered so far\n`)
+  // Markers and ledger lines together: on a session upgraded from the
+  // ledger-only version, either record alone is a partial count.
+  process.stdout.write(`  emitted : ${deliveredCount(d)} delivered so far\n`)
   process.stdout.write(`  codex   : ${verifiedWorkerPid(path.join(d, "worker.pid")) ? "running" : "idle"}\n`)
   const stuck = pending.filter(f => {
     try { return Date.now() - fs.statSync(f).mtimeMs > 3 * 60000 } catch { return false }

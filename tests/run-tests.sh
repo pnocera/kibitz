@@ -148,6 +148,15 @@ plant legacy-delivered "delivered by the previous version"
 check "a ledger-only delivery is honoured after upgrading" \
   '[ -z "$(fire PreToolUse)" ]' "re-emitted an advisory the old version delivered"
 
+# Same upgraded state, now with one new delivery: the count is the union of both
+# records. Preferring markers when any exist hides every pre-upgrade delivery,
+# and makes the first new one *reduce* the reported total from 1 to 1.
+plant id-union "delivered after the upgrade"
+fire PreToolUse >/dev/null
+check "emitted counts markers and legacy ledger lines together" \
+  '[ "$("$ADV" status "$WORK" | sed -n "s/.*emitted *: \([0-9]*\).*/\1/p")" = 2 ]' \
+  "$("$ADV" status "$WORK" | grep emitted)"
+
 plant id-bbb "second advisory"
 plant id-ccc "third advisory"
 plant id-ddd "fourth advisory"

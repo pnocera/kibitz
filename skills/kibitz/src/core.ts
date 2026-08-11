@@ -120,8 +120,8 @@ export function appendSync(p: string, line: string): boolean {
  *  again. O_EXCL creation of a per-id marker is the commit point instead --
  *  exactly one caller can create it, whatever the timing.
  *
- *  The human-readable ledger is still appended, because it is what `status`
- *  counts and what an operator reads. */
+ *  The human-readable ledger is still appended, because it is what an operator
+ *  reads and what deliveredCount() folds in for sessions that predate markers. */
 export function claimDelivery(sessionDir: string, id: string): boolean {
   // The id is now a filename, which it never was while the ledger was only text.
   // A corrupt or planted record naming "../../x" would otherwise write outside
@@ -141,9 +141,9 @@ export function claimDelivery(sessionDir: string, id: string): boolean {
   try { dfd = fs.openSync(dir, "r"); fs.fsyncSync(dfd) } catch {} finally {
     if (dfd !== undefined) try { fs.closeSync(dfd) } catch {}
   }
-  // The ledger is what `status` counts and an operator reads. If it cannot be
-  // written the claim still stands -- undoing it would risk a duplicate, which
-  // is worse -- but say so rather than report a silent success.
+  // The ledger is what an operator reads; the marker above is the claim. If the
+  // ledger cannot be written the claim still stands -- undoing it would risk a
+  // duplicate, which is worse -- but say so rather than report a silent success.
   if (!appendSync(path.join(sessionDir, "ledger"), `${id}\n`))
     process.stderr.write(`kibitzer: delivered ${id} but could not append the ledger\n`)
   return true
@@ -159,6 +159,26 @@ export function alreadyDelivered(sessionDir: string, id: string): boolean {
   // would go out a second time on the first drain after updating.
   const led = read(path.join(sessionDir, "ledger"))
   return led !== null && led.split("\n").includes(id)
+}
+
+/** How many advisories this session has delivered: the union of both records.
+ *
+ *  Markers and ledger lines are not alternatives. A session upgraded from the
+ *  ledger-only version accumulates markers for new deliveries while its earlier
+ *  ones exist only as ledger lines, so preferring either record alone
+ *  under-reports the other -- and picking the ledger only when there are no
+ *  markers makes the first new delivery *reduce* the reported total.
+ *
+ *  A ledger line whose marker exists is the same delivery counted twice, so the
+ *  ledger only contributes ids that no marker covers. */
+export function deliveredCount(sessionDir: string): number {
+  let markers: string[] = []
+  try { markers = fs.readdirSync(path.join(sessionDir, "delivered")) } catch {}
+  const have = new Set(markers)
+  const legacy = new Set<string>()
+  for (const id of (read(path.join(sessionDir, "ledger")) ?? "").split("\n"))
+    if (id !== "" && !have.has(markerName(id))) legacy.add(id)
+  return have.size + legacy.size
 }
 
 export const listJson = (dir: string): string[] => {
