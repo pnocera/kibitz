@@ -30,7 +30,7 @@ import * as path from "node:path"
 import {
   LEASE_SECONDS, MAX_PER_DRAIN, SENTINEL,
   ageMinutes, appendSync, epochOf, isEnabled, isMuted, isQuiet,
-  listJson, procStart, read, rm, sessDir,
+  listJson, procStart, read, rm, sessDir, validSid,
 } from "./core.ts"
 
 // Validated, not raw Number(): 0, NaN or text would become a near-zero interval
@@ -95,14 +95,6 @@ function handle(line: string) {
 
 let warnedUnbound = false
 
-/** A session id becomes a path segment in sessDir, so neither the environment
- *  override nor a registry record may contain separators or traversal. The
- *  registry is the automatic path and gets the same check: a malformed or stale
- *  record naming "../../elsewhere" would otherwise consume and ledger another
- *  subtree entirely. */
-const validSid = (v: unknown): v is string =>
-  typeof v === "string" && /^[A-Za-z0-9._-]+$/.test(v) && v !== "." && v !== ".."
-
 /** The session this channel belongs to, established rather than guessed.
  *
  *  Claude Code registers each session at ~/.claude/sessions/<pid>.json with its
@@ -139,10 +131,15 @@ function boundSession(): string | null {
         // reused would otherwise bind this channel to a dead session -- the same
         // wrong-recipient failure, arrived at from the other direction. The
         // registry stores procStart precisely so this can be checked.
+        // Both identity fields are REQUIRED. Treating a missing field as
+        // agreement would bind on the filename alone, which is exactly the
+        // pid-reuse case this check exists to stop. The live registry always
+        // records both, so demanding them costs nothing real.
         const live = procStart(pid)
-        const same = j?.procStart === undefined || String(j.procStart) === String(live)
-        const rightPid = j?.pid === undefined || Number(j.pid) === pid
-        if (validSid(j?.sessionId) && same && rightPid) return j.sessionId
+        const sameStart = j?.procStart !== undefined && live !== null &&
+          String(j.procStart) === String(live)
+        const samePid = Number(j?.pid) === pid
+        if (validSid(j?.sessionId) && sameStart && samePid) return j.sessionId
       } catch {}
     }
     const stat = read(`/proc/${pid}/stat`)

@@ -77,6 +77,17 @@ check "on: state records enabled" '[ "$(cut -d" " -f1 "$(pdir)/state")" = "1" ]'
 fire UserPromptSubmit >/dev/null
 check "on: session state is initialised by the first hook" '[ -d "$(sdir)/outbox" ]'
 
+# The hook payload is the normal source of session ids, and an id becomes a path
+# segment. A traversal must create nothing and change nothing.
+jq -cn --arg c "$WORK" '{cwd:$c, session_id:"../../escaped", transcript_path:""}' \
+  | "$ADV" hook UserPromptSubmit >/dev/null 2>&1
+HOOKRC=$?
+check "a traversing session_id is refused by the hook" '[ "$HOOKRC" -eq 0 ]' "rc=$HOOKRC"
+ESC="$(find "$ADVISOR_STATE_ROOT" -maxdepth 4 -name escaped 2>/dev/null)"
+check "and it creates no state outside the sessions root" '[ -z "$ESC" ]' "$ESC"
+check "and does not become the recorded current session" \
+  '! grep >/dev/null escaped "$(pdir)/current-session" 2>/dev/null'
+
 echo
 echo "delivery"
 
@@ -636,6 +647,12 @@ plant chan-trav "must not escape the session subtree"
   >"$WORK/chantrav.out" 2>"$WORK/chantrav.err"
 check "a traversal in KIBITZ_SESSION is refused" \
   'grep >/dev/null "not a valid session id" "$WORK/chantrav.err"' "$(cat "$WORK/chantrav.err")"
+# The documented consequence: an invalid override is ignored and binding falls
+# back to ancestry, so delivery continues for the CORRECT session. Asserted so
+# the fallback is a decision rather than an accident.
+check "an ignored override falls back to the ancestry binding" \
+  'grep >/dev/null "must not escape the session subtree" "$WORK/chantrav.out"' \
+  "$(cat "$WORK/chantrav.out")"
 ESCAPED="$(find "$ADVISOR_STATE_ROOT" -maxdepth 4 -name elsewhere 2>/dev/null)"
 check "and nothing was created outside the project subtree" '[ -z "$ESCAPED" ]' "$ESCAPED"
 

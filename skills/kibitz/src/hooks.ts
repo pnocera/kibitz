@@ -8,7 +8,8 @@ import * as path from "node:path"
 import {
   BIN, LEASE_SECONDS, MAX_PER_DRAIN, MIN_INTERVAL, SENTINEL,
   ageMinutes, appendSync, epochOf, initSess, isEnabled, isMuted, isNavigation,
-  isQuiet, isoNow, killTree, listJson, read, readState, rm, sessDir, verifiedWorkerPid,
+  isQuiet, isoNow, killTree, listJson, read, readState, rm, sessDir, validSid,
+  verifiedWorkerPid,
 } from "./core.ts"
 
 const BANNER = `Advisory from Codex, an independent observer of this session.
@@ -146,7 +147,12 @@ export function runHook(event: string, raw: string): number {
   let payload: any = {}
   try { payload = JSON.parse(raw) } catch {}
   const cwd = payload.cwd || process.cwd()
-  const sid = payload.session_id || "nosession"
+  const rawSid = payload.session_id || "nosession"
+  // The hook payload is the normal producer of session ids, and the id becomes a
+  // path segment. Refuse rather than sanitise: a silently rewritten id would
+  // split one session's state across two directories.
+  if (!validSid(rawSid)) return 0
+  const sid = rawSid
 
   // ONE read: enabled and epoch sampled together, once, for this hook's whole
   // lifetime. Everything it does later belongs to the epoch it was admitted in,

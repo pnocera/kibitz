@@ -55,6 +55,13 @@ export function hashPath(s: string): string {
   return `${(~c) >>> 0}${b.length}`.slice(0, 12)
 }
 
+/** A session id becomes a path segment, so every source of one is checked:
+ *  hook payloads (the normal producer), the channel's environment override, and
+ *  Claude's session registry. Separators or traversal would let a caller read
+ *  and write outside the sessions root. */
+export const validSid = (v: unknown): v is string =>
+  typeof v === "string" && /^[A-Za-z0-9._-]+$/.test(v) && v !== "." && v !== ".."
+
 export const projDir = (cwd: string) => path.join(STATE_ROOT, "projects", hashPath(cwd))
 export const sessDir = (cwd: string, sid: string) => path.join(projDir(cwd), "sessions", sid)
 
@@ -83,7 +90,16 @@ export function appendSync(p: string, line: string): boolean {
   let fd: number | undefined
   try {
     fd = fs.openSync(p, "a")
-    fs.writeSync(fd, line)
+    // Loop on the byte count: a short write followed by a successful fsync
+    // would durably store a truncated id, and the ledger check that prevents a
+    // second delivery is an exact line match.
+    const buf = Buffer.from(line, "utf8")
+    let off = 0
+    while (off < buf.length) {
+      const n = fs.writeSync(fd, buf, off, buf.length - off)
+      if (!(n > 0)) return false
+      off += n
+    }
     fs.fsyncSync(fd)
     return true
   } catch {
@@ -282,8 +298,12 @@ export function initSess(cwd: string, sid: string): string {
   return d
 }
 
-export const currentSession = (cwd: string): string | null =>
-  read(path.join(projDir(cwd), "current-session"))?.trim() || null
+export const currentSession = (cwd: string): string | null => {
+  // Validated on read as well as on write: the file is persisted state, and a
+  // consumer that trusts it turns one bad write into a lasting path escape.
+  const v = read(path.join(projDir(cwd), "current-session"))?.trim()
+  return validSid(v) ? v : null
+}
 
 // What counts as ours, stated exactly, because install and uninstall DELETE
 // whatever matches. We write two shapes and no others: the plugin form, and the
