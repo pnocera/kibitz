@@ -318,6 +318,21 @@ wait "$OFFPID" 2>/dev/null; wait "$WPID" 2>/dev/null
 check "nothing the stalled worker published survives into the next epoch" \
   '[ -z "$(fire PreToolUse)" ]' "a pre-off advisory was delivered after re-enabling"
 
+# SessionEnd must reap the whole cycle. The worker waits synchronously on
+# `timeout codex`, so killing only the worker leaves Codex running.
+"$ADV" on "$WORK" >/dev/null
+rm -f "$(sdir)/worker.pid"
+PATH="$STALLBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1 &
+EPID=$!
+for _ in $(seq 1 100); do [ -s "$(sdir)/worker.pid" ] && break; sleep 0.05; done
+KID="$(pgrep -P "$(cut -d" " -f1 "$(sdir)/worker.pid")" 2>/dev/null | head -1)"
+check "the cycle has a child to reap" '[ -n "$KID" ]'
+fire SessionEnd >/dev/null
+for _ in $(seq 1 60); do kill -0 "$KID" 2>/dev/null || break; sleep 0.05; done
+check "SessionEnd reaps the codex child, not just the worker" \
+  '! kill -0 "$KID" 2>/dev/null' "child $KID survived SessionEnd"
+wait "$EPID" 2>/dev/null
+
 echo
 echo "off races a completing worker  (found by the advisor, on itself)"
 

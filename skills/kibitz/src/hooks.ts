@@ -2,7 +2,7 @@
 // This is the hot path -- it runs on every tool call, inside Claude Code's 2s
 // budget, alongside whatever other hooks the operator has registered.
 
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import {
@@ -179,7 +179,13 @@ export function runHook(event: string, raw: string): number {
       break
     case "SessionEnd": {
       const pid = verifiedWorkerPid(path.join(sessDir(cwd, sid), "worker.pid"))
-      if (pid) try { process.kill(pid, "SIGTERM") } catch {}
+      if (pid) {
+        // Children first, as `off` does. The worker waits synchronously on
+        // `timeout codex`, so signalling only the worker leaves Codex orphaned
+        // and running for up to CODEX_TIMEOUT after the session is gone.
+        try { spawnSync("pkill", ["-TERM", "-P", String(pid)], { stdio: "ignore" }) } catch {}
+        try { process.kill(pid, "SIGTERM") } catch {}
+      }
       break
     }
   }
