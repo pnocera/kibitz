@@ -5,7 +5,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
+      # kibitzer is Bun TypeScript, so without this every test that runs the
+      # binary fails on `env: 'bun': No such file or directory` -- 82 of them.
+      # Codex itself is faked inside the suite and is not needed here.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Show versions
+        run: bun --version && jq --version
       - name: Run acceptance tests
         run: bash tests/run-tests.sh
