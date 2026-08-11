@@ -153,9 +153,16 @@ check "a ledger-only delivery is honoured after upgrading" \
 # and makes the first new one *reduce* the reported total from 1 to 1.
 plant id-union "delivered after the upgrade"
 fire PreToolUse >/dev/null
-check "emitted counts markers and legacy ledger lines together" \
-  '[ "$("$ADV" status "$WORK" | sed -n "s/.*emitted *: \([0-9]*\).*/\1/p")" = 2 ]' \
-  "$("$ADV" status "$WORK" | grep emitted)"
+check "the claimed count sums markers and legacy ledger lines" \
+  '[ "$("$ADV" status "$WORK" | sed -n "s/.*claimed *: \([0-9]*\).*/\1/p")" = 2 ]' \
+  "$("$ADV" status "$WORK" | grep claimed)"
+
+# The label must not promise more than the records establish: a marker is
+# written before the final off/epoch check, so `off` in that window leaves a
+# counted advisory that was never shown.
+check "status does not call the count an emission" \
+  '! "$ADV" status "$WORK" | grep -E "emitted|shown|displayed" >/dev/null' \
+  "$("$ADV" status "$WORK")"
 
 plant id-bbb "second advisory"
 plant id-ccc "third advisory"

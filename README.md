@@ -179,11 +179,16 @@ claude --dangerously-load-development-channels server:kibitz
 That flag prints a **WARNING: Loading development channels** banner naming `server:kibitz`. This is
 expected and is not an error — it is the consent notice for the flag, and the channel loads.
 
-The banner cannot be avoided by using `--channels` instead. `server:` entries always require the
-development flag, and without it the entry is **skipped silently**: Claude starts with no channel and
-says nothing. `--channels` only accepts `plugin:<name>@<marketplace>`, against an allowlist that is
-either Anthropic's own or `allowedChannelPlugins` in *managed* settings — neither of which a
-third-party plugin is on. So the flag above is the only way to run this channel.
+Do not try to avoid the banner by dropping the flag and passing `--channels server:kibitz`. A
+`server:` entry always requires the development flag, and without it the entry is **skipped
+silently**: Claude starts with no channel and tells you nothing. You lose the push and are not
+warned.
+
+`--channels` takes only `plugin:<name>@<marketplace>` entries, against an allowlist that is either
+Anthropic's own or `allowedChannelPlugins` in **managed** settings. On an ordinary workstation
+kibitz is on neither, so the flag above is the way to run it. An administrator who allowlists
+`plugin:kibitz@<marketplace>` in managed settings can run it through `--channels` without the
+banner; that route is untested here.
 
 It is a **second consumer of the same queue**, not a replacement. It claims records by the same
 atomic rename and writes the same ledger, so the two can never both deliver one advisory, and
@@ -204,7 +209,7 @@ a wrong-recipient failure, not merely a late delivery. Set `KIBITZ_SESSION` to b
 bash tests/run-tests.sh
 ```
 
-169 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+170 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
 reading, invocation confinement, the plugin package (manifest, hook events, relocatable

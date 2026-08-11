@@ -78,9 +78,13 @@ export function cmdStatus(cwd = process.cwd()): number {
   const pending = listJson(path.join(d, "outbox"))
   process.stdout.write(`  session : ${sid}\n`)
   process.stdout.write(`  pending : ${pending.length} advisories waiting\n`)
-  // Markers and ledger lines together: on a session upgraded from the
-  // ledger-only version, either record alone is a partial count.
-  process.stdout.write(`  emitted : ${deliveredCount(d)} delivered so far\n`)
+  // "claimed", not "emitted": both consumers commit the marker BEFORE their
+  // final off/epoch check, so an advisory that `off` catches in that window is
+  // counted here and never shown. The channel has no acknowledgement either, so
+  // no record we hold can honestly claim the operator saw anything. Markers and
+  // ledger lines together: on a session upgraded from the ledger-only version,
+  // either record alone is a partial count.
+  process.stdout.write(`  claimed : ${deliveredCount(d)} advisories committed for delivery\n`)
   process.stdout.write(`  codex   : ${verifiedWorkerPid(path.join(d, "worker.pid")) ? "running" : "idle"}\n`)
   const stuck = pending.filter(f => {
     try { return Date.now() - fs.statSync(f).mtimeMs > 3 * 60000 } catch { return false }
