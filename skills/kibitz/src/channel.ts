@@ -18,19 +18,27 @@
 // Requires a launch flag, because custom channels are a research preview:
 //   claude --dangerously-load-development-channels server:kibitz
 //
-// Known limit: the server is a subprocess of one session but is not told which,
-// so it binds to the project's current session. Two Claude sessions in one
-// checkout would make that ambiguous; run the channel in only one of them.
+// Session binding: Claude Code does not tell an MCP server which session it
+// serves, so the channel establishes it from its own ancestry against Claude's
+// session registry. If it cannot, it declines to push rather than guess --
+// delivering one session's advisory into another is a wrong-recipient failure,
+// not merely a late one. KIBITZ_SESSION overrides.
 
 import * as fs from "node:fs"
+import * as os from "node:os"
 import * as path from "node:path"
 import {
   LEASE_SECONDS, MAX_PER_DRAIN, SENTINEL,
-  ageMinutes, appendSync, currentSession, epochOf, isEnabled, isMuted, isQuiet,
+  ageMinutes, appendSync, epochOf, isEnabled, isMuted, isQuiet,
   listJson, read, rm, sessDir,
 } from "./core.ts"
 
-const POLL_MS = Number(process.env.KIBITZ_CHANNEL_POLL_MS ?? 2000)
+// Validated, not raw Number(): 0, NaN or text would become a near-zero interval
+// and spin a core for the life of a deliberately long-lived process.
+const POLL_MS = (() => {
+  const n = Number(process.env.KIBITZ_CHANNEL_POLL_MS)
+  return Number.isFinite(n) && n >= 50 ? n : 2000
+})()
 
 const BANNER = `Advisory from Codex, an independent observer of this session.
 
@@ -85,10 +93,51 @@ function handle(line: string) {
 
 // --- the outbox consumer ----------------------------------------------------
 
+let warnedUnbound = false
+
+/** The session this channel belongs to, established rather than guessed.
+ *
+ *  Claude Code registers each session at ~/.claude/sessions/<pid>.json with its
+ *  sessionId, and a channel is a subprocess of that Claude. Walking our own
+ *  ancestry to the registered pid is therefore authoritative and per-session.
+ *
+ *  A directory-mtime heuristic was tried first and is not liveness: an idle but
+ *  running channel ages out, a newer session becomes the only recent one, and
+ *  the old channel then claims the newer session's advisory -- exactly the
+ *  wrong-recipient failure this has to prevent. With no binding we decline and
+ *  let the hook drain deliver, which is always correct if less immediate. */
+function boundSession(): string | null {
+  if (process.env.KIBITZ_SESSION) return process.env.KIBITZ_SESSION
+  const reg = path.join(os.homedir(), ".claude", "sessions")
+  let pid = process.pid
+  for (let depth = 0; depth < 12 && pid > 1; depth++) {
+    const rec = read(path.join(reg, `${pid}.json`))
+    if (rec) {
+      try {
+        const sid = JSON.parse(rec)?.sessionId
+        if (typeof sid === "string" && sid) return sid
+      } catch {}
+    }
+    const stat = read(`/proc/${pid}/stat`)
+    if (!stat) break
+    const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1])
+    if (!Number.isInteger(ppid) || ppid <= 1) break
+    pid = ppid
+  }
+  if (!warnedUnbound) {
+    warnedUnbound = true
+    process.stderr.write(
+      "kibitzer channel: could not establish which Claude session this belongs to, so it will " +
+      "not push. The hook drain still delivers on the next tool call. Set KIBITZ_SESSION to " +
+      "bind explicitly.\n")
+  }
+  return null
+}
+
 function drainOnce(cwd: string) {
   if (!ready) return                 // not through MCP initialization yet
   if (!isEnabled(cwd) || isQuiet(cwd)) return
-  const sid = currentSession(cwd)
+  const sid = boundSession()
   if (!sid) return
   const d = sessDir(cwd, sid)
   const nowEpoch = epochOf(cwd)

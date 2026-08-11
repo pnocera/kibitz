@@ -183,8 +183,10 @@ It does not add an acknowledgement. Claude Code does not acknowledge channel not
 unregistered or policy-blocked channel drops them silently, so the contract is unchanged: lose
 rather than duplicate, with `advice.log` as the record of truth.
 
-One limit worth knowing: the server is a subprocess of one session but is not told which, so it
-binds to the project's current session. Run it in only one session per checkout.
+Claude Code does not tell an MCP server which session it serves, so the channel works it out from
+its own process ancestry against Claude's session registry. If it cannot, it **declines to push**
+and the hook drain delivers as usual — pushing one session's advisory into another session would be
+a wrong-recipient failure, not merely a late delivery. Set `KIBITZ_SESSION` to bind it by hand.
 
 ## Tests
 
@@ -192,7 +194,7 @@ binds to the project's current session. Run it in only one session per checkout.
 bash tests/run-tests.sh
 ```
 
-144 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+152 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
 reading, invocation confinement, the plugin package (manifest, hook events, relocatable

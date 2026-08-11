@@ -343,6 +343,25 @@ check "SessionEnd reaps the codex grandchild, not just the wrapper" \
   '! kill -0 "$GKID" 2>/dev/null' "grandchild $GKID survived SessionEnd"
 wait "$EPID" 2>/dev/null
 
+# The detached path, which is the one production uses: a cycle started through
+# the Stop hook runs under setsid, so killTree takes its process-group branch.
+# The direct-invocation test above only ever exercises the fallback.
+"$ADV" on "$WORK" >/dev/null
+rm -f "$(sdir)/worker.pid" "$(sdir)/last-cycle"
+( cd "$WORK" && PATH="$STALLBIN:$PATH" bash -c 'jq -cn --arg c "$1" --arg s "$2" \
+    "{cwd:\$c, session_id:\$s, transcript_path:\"\"}" | "$3" hook Stop' _ "$WORK" "$SID" "$ADV" ) >/dev/null 2>&1
+for _ in $(seq 1 120); do [ -s "$(sdir)/worker.pid" ] && break; sleep 0.05; done
+SPID="$(cut -d' ' -f1 "$(sdir)/worker.pid" 2>/dev/null)"
+check "the Stop hook started a detached cycle" '[ -n "$SPID" ] && kill -0 "$SPID" 2>/dev/null' \
+  "pid=$SPID"
+SGRP="$(awk '{print $5}' /proc/$SPID/stat 2>/dev/null)"
+check "the detached cycle is in its own process group" \
+  '[ -n "$SGRP" ] && [ "$SGRP" != "$$" ]' "pgid=$SGRP shell=$$"
+fire SessionEnd >/dev/null
+for _ in $(seq 1 80); do kill -0 "$SPID" 2>/dev/null || break; sleep 0.05; done
+check "SessionEnd ends a detached cycle through its group" \
+  '! kill -0 "$SPID" 2>/dev/null' "pid $SPID survived"
+
 echo
 echo "off races a completing worker  (found by the advisor, on itself)"
 
@@ -557,7 +576,7 @@ check "the channel resolves its binary through CLAUDE_PLUGIN_ROOT" \
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-1 "advice for the channel"
 ( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 3 ) \
-  | ( cd "$WORK" && KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+  | ( cd "$WORK" && KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
   >"$WORK/chan.out" 2>/dev/null
 check "the channel emits a channel notification for a pending advisory" \
   'grep >/dev/null "notifications/claude/channel" "$WORK/chan.out"' "$(cat "$WORK/chan.out")"
@@ -570,13 +589,49 @@ check "and records it in the same ledger the hook drain uses" \
 check "so the hook drain will not deliver it a second time" \
   '[ -z "$(fire PreToolUse)" ]'
 
+# Binding is established, never guessed. With no ancestry to resolve and no
+# explicit binding, the channel declines rather than push into a session it
+# cannot identify -- pushing one session's advisory into another is a
+# wrong-recipient failure, not merely a late one. An mtime "recently active"
+# heuristic was tried first and is not liveness: a live but idle session ages
+# out and the channel then follows the project-global marker to a newer session.
+"$ADV" on "$WORK" >/dev/null
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+plant chan-amb "must not cross sessions"
+EMPTYHOME="$WORK/nohome"; mkdir -p "$EMPTYHOME"
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+  >"$WORK/chanamb.out" 2>"$WORK/chanamb.err"
+check "an unbindable channel refuses to push" \
+  '! grep >/dev/null "must not cross sessions" "$WORK/chanamb.out"' "$(cat "$WORK/chanamb.out")"
+check "and says why, once" \
+  'grep >/dev/null "could not establish which Claude session" "$WORK/chanamb.err"' \
+  "$(cat "$WORK/chanamb.err")"
+check "the advisory stays queued for the hook drain instead" \
+  '[ -n "$(find "$(sdir)/outbox" -name "*.json" 2>/dev/null)" ]'
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=200 \
+      timeout 5 "$ADV" channel ) >"$WORK/chanbound.out" 2>/dev/null
+check "KIBITZ_SESSION binds it explicitly and delivery resumes" \
+  'grep >/dev/null "must not cross sessions" "$WORK/chanbound.out"' "$(cat "$WORK/chanbound.out")"
+# And the registry path: a session record naming this pid's ancestor binds it.
+mkdir -p "$EMPTYHOME/.claude/sessions"
+jq -n --arg s "$SID" '{sessionId:$s}' >"$EMPTYHOME/.claude/sessions/$$.json"
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+plant chan-reg "bound through the registry"
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+  >"$WORK/chanreg.out" 2>/dev/null
+check "Claude's session registry binds the channel without configuration" \
+  'grep >/dev/null "bound through the registry" "$WORK/chanreg.out"' "$(cat "$WORK/chanreg.out")"
+
 # `off` landing mid-drain must stop the channel too, not only the hook.
 "$ADV" on "$WORK" >/dev/null
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-off "must not be pushed after off"
 ( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'
   sleep 0.4; ( cd "$WORK" && "$ADV" off "$WORK" >/dev/null ); sleep 2 ) \
-  | ( cd "$WORK" && KIBITZ_CHANNEL_POLL_MS=1000 timeout 6 "$ADV" channel ) \
+  | ( cd "$WORK" && KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=1000 timeout 6 "$ADV" channel ) \
   >"$WORK/chanoff.out" 2>/dev/null
 check "off stops the channel pushing, as it stops the hook drain" \
   '! grep >/dev/null "must not be pushed after off" "$WORK/chanoff.out"' \
