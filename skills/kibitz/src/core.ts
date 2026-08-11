@@ -290,6 +290,10 @@ export function isMuted(cwd: string, text: string): boolean {
 }
 
 export function initSess(cwd: string, sid: string): string {
+  // Guard at the sink, not only at each ingress: this is where a session id
+  // first becomes directories on disk, so every present and future caller is
+  // covered by one check.
+  if (!validSid(sid)) throw new Error(`invalid session id: ${JSON.stringify(sid)}`)
   const d = sessDir(cwd, sid)
   for (const sub of ["tmp", "outbox", "outbox-processing", "events", "events-processing"])
     mkdirp(path.join(d, sub))

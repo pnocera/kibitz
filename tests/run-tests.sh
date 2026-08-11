@@ -87,6 +87,12 @@ ESC="$(find "$ADVISOR_STATE_ROOT" -maxdepth 4 -name escaped 2>/dev/null)"
 check "and it creates no state outside the sessions root" '[ -z "$ESC" ]' "$ESC"
 check "and does not become the recorded current session" \
   '! grep >/dev/null escaped "$(pdir)/current-session" 2>/dev/null'
+# `worker` is a public entrypoint too, and takes the id as an argument.
+"$ADV" worker "$WORK" "../../escaped-worker" "" >/dev/null 2>&1
+WRC=$?
+check "the worker entrypoint refuses a traversing session id" '[ "$WRC" -ne 0 ]' "rc=$WRC"
+ESCW="$(find "$ADVISOR_STATE_ROOT" -maxdepth 4 -name "escaped-worker" 2>/dev/null)"
+check "and creates nothing outside the sessions root" '[ -z "$ESCW" ]' "$ESCW"
 
 echo
 echo "delivery"

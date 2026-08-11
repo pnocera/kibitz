@@ -9,7 +9,7 @@ import * as path from "node:path"
 import {
   ACTIVITY_LINES, BIN, CODEX_TIMEOUT, PROMPT_TMPL, SCHEMA, SENTINEL, TRANSCRIPT_LINES,
   ageMinutes, append, epochOf, exists, initSess, isEnabled, isMuted, isoNow,
-  listJson, read, rm, writeWorkerPid,
+  listJson, read, rm, validSid, writeWorkerPid,
 } from "./core.ts"
 
 /** Read only the end of a file. A transcript grows for the whole session, so
@@ -85,6 +85,11 @@ const fingerprint = (s: string) =>
   createHash("sha1").update(s.toLowerCase().replace(/\s+/g, " ")).digest("hex")
 
 export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = ""): number {
+  // `kibitzer worker <cwd> <sid>` is a public entrypoint, and sid becomes a path.
+  if (!validSid(sid)) {
+    process.stderr.write(`kibitzer: invalid session id\n`)
+    return 2
+  }
   // One cycle per session. flock(1) rather than an in-process lock: the same
   // guarantee, with semantics the shell test suite can observe directly.
   if (!process.env.KIBITZ_LOCKED) {
