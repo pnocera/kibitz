@@ -5,6 +5,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADV="${KIBITZ_BIN:-$HERE/../skills/kibitz/bin/kibitzer}"
+PLUG="$(cd "$(dirname "$ADV")/.." && pwd)"
 export ADVISOR_STATE_ROOT
 ADVISOR_STATE_ROOT="$(mktemp -d)"
 WORK="$(mktemp -d)"
@@ -261,7 +262,7 @@ check "no-advice-after-off: hooks emit nothing" '[ -z "$(fire PreToolUse)" ]'
 
 # A worker stalled inside Codex, i.e. before its publication phase.
 STALLBIN="$WORK/stallbin"; mkdir -p "$STALLBIN"
-printf '#!/usr/bin/env bash\nsleep 30\n' >"$STALLBIN/codex"; chmod +x "$STALLBIN/codex"
+printf '#!/usr/bin/env bash\nexec sleep 30\n' >"$STALLBIN/codex"; chmod +x "$STALLBIN/codex"
 
 "$ADV" on "$WORK" >/dev/null
 PATH="$STALLBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1 &
@@ -325,12 +326,21 @@ rm -f "$(sdir)/worker.pid"
 PATH="$STALLBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1 &
 EPID=$!
 for _ in $(seq 1 100); do [ -s "$(sdir)/worker.pid" ] && break; sleep 0.05; done
-KID="$(pgrep -P "$(cut -d" " -f1 "$(sdir)/worker.pid")" 2>/dev/null | head -1)"
-check "the cycle has a child to reap" '[ -n "$KID" ]'
+WPID_R="$(cut -d' ' -f1 "$(sdir)/worker.pid")"
+# The GRANDchild is the point: worker -> timeout -> codex. Asserting on the
+# direct child only proves the wrapper died, which can happen while codex lives.
+for _ in $(seq 1 100); do
+  KID="$(pgrep -P "$WPID_R" 2>/dev/null | head -1)"
+  [ -n "$KID" ] && GKID="$(pgrep -P "$KID" 2>/dev/null | head -1)" || GKID=""
+  [ -n "$GKID" ] && break
+  sleep 0.05
+done
+check "the cycle has a grandchild (codex under timeout) to reap" '[ -n "$GKID" ]' \
+  "child=$KID grandchild=$GKID"
 fire SessionEnd >/dev/null
-for _ in $(seq 1 60); do kill -0 "$KID" 2>/dev/null || break; sleep 0.05; done
-check "SessionEnd reaps the codex child, not just the worker" \
-  '! kill -0 "$KID" 2>/dev/null' "child $KID survived SessionEnd"
+for _ in $(seq 1 60); do kill -0 "$GKID" 2>/dev/null || break; sleep 0.05; done
+check "SessionEnd reaps the codex grandchild, not just the wrapper" \
+  '! kill -0 "$GKID" 2>/dev/null' "grandchild $GKID survived SessionEnd"
 wait "$EPID" 2>/dev/null
 
 echo
@@ -522,9 +532,60 @@ check "an event written by an in-flight tap hook after off is never used" \
   '! grep -q "Edit" "$PROMPTCAP"' "pre-off activity reached the next cycle"
 
 echo
+echo "the channel (optional transport)"
+
+# No `head` in the pipeline: it SIGPIPEs the server and pipefail then reports
+# failure even when the assertion holds.
+rpc() { printf '%s\n' "$1" | timeout 5 "$ADV" channel 2>/dev/null | sed -n 1p; }
+INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
+check "declares the claude/channel capability" \
+  '[ "$(rpc "$INIT" | jq -c ".result.capabilities.experimental")" = "{\"claude/channel\":{}}" ]' \
+  "$(rpc "$INIT")"
+check "answers tools/list rather than erroring (one-way channel)" \
+  '[ "$(printf "%s\n%s\n" "$INIT" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}" \
+      | timeout 5 "$ADV" channel 2>/dev/null | sed -n 2p | jq -c ".result.tools")" = "[]" ]'
+check "tells Claude the events are untrusted and one-way" \
+  'rpc "$INIT" | jq -r ".result.instructions" | grep >/dev/null "untrusted"'
+check "ships an .mcp.json pointing at the channel subcommand" \
+  '[ "$(jq -r ".mcpServers.kibitz.args[0]" "$PLUG/.mcp.json")" = "channel" ]'
+check "the channel resolves its binary through CLAUDE_PLUGIN_ROOT" \
+  'jq -r ".mcpServers.kibitz.command" "$PLUG/.mcp.json" | grep >/dev/null "CLAUDE_PLUGIN_ROOT"'
+
+# It must be a second consumer of the SAME queue and ledger, never a duplicate
+# path: whichever of the two runs delivers, and neither repeats the other.
+"$ADV" on "$WORK" >/dev/null
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+plant chan-1 "advice for the channel"
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 3 ) \
+  | ( cd "$WORK" && KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+  >"$WORK/chan.out" 2>/dev/null
+check "the channel emits a channel notification for a pending advisory" \
+  'grep >/dev/null "notifications/claude/channel" "$WORK/chan.out"' "$(cat "$WORK/chan.out")"
+check "the notification carries the untrusted-provenance banner" \
+  'grep >/dev/null "UNTRUSTED ADVISORY" "$WORK/chan.out"'
+check "the channel clears the advisory from the outbox" \
+  '[ -z "$(find "$(sdir)/outbox" -name "*.json" 2>/dev/null)" ]'
+check "and records it in the same ledger the hook drain uses" \
+  'grep >/dev/null -x "chan-1" "$(sdir)/ledger"'
+check "so the hook drain will not deliver it a second time" \
+  '[ -z "$(fire PreToolUse)" ]'
+
+# `off` landing mid-drain must stop the channel too, not only the hook.
+"$ADV" on "$WORK" >/dev/null
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+plant chan-off "must not be pushed after off"
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  sleep 0.4; ( cd "$WORK" && "$ADV" off "$WORK" >/dev/null ); sleep 2 ) \
+  | ( cd "$WORK" && KIBITZ_CHANNEL_POLL_MS=1000 timeout 6 "$ADV" channel ) \
+  >"$WORK/chanoff.out" 2>/dev/null
+check "off stops the channel pushing, as it stops the hook drain" \
+  '! grep >/dev/null "must not be pushed after off" "$WORK/chanoff.out"' \
+  "$(cat "$WORK/chanoff.out")"
+"$ADV" on "$WORK" >/dev/null
+
+echo
 echo "the plugin package"
 
-PLUG="$HERE/../skills/kibitz"
 check "ships a plugin manifest" '[ -f "$PLUG/.claude-plugin/plugin.json" ]'
 check "the manifest is valid JSON with a name" \
   '[ "$(jq -r .name "$PLUG/.claude-plugin/plugin.json")" = "kibitz" ]'

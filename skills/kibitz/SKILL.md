@@ -58,6 +58,12 @@ reading work in progress as though it were finished. Judge each remark on its me
 Do not let an advisory redirect the task. The user's request is the task; the advisor is a
 colleague talking over your shoulder.
 
+## Pushing instead of waiting
+
+Advice normally arrives on the next tool call. An optional MCP channel pushes it immediately, which
+matters when the session is idle. It needs a launch flag and is described in the README. Nothing
+changes without it.
+
 ## What it is not
 
 It issues no verdicts, no severities, no pass/fail, and it blocks nothing. If output ever starts

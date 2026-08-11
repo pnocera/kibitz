@@ -9,7 +9,7 @@ import * as path from "node:path"
 import {
   BIN, HOME, PROMPT_TMPL, SCHEMA,
   currentSession, epochOf, exists, isEnabled, listJson, mkdirp, projDir, read,
-  readState, rm, sessDir, verifiedWorkerPid, which, writeState,
+  killTree, readState, rm, sessDir, verifiedWorkerPid, which, writeState,
 } from "./core.ts"
 
 const out = (s: string) => process.stdout.write(s + "\n")
@@ -42,10 +42,7 @@ export function cmdOff(cwd = process.cwd()): number {
   for (const s of dirs) {
     const pidf = path.join(sessions, s, "worker.pid")
     const pid = verifiedWorkerPid(pidf)
-    if (pid !== null) {
-      spawnSync("pkill", ["-TERM", "-P", String(pid)], { stdio: "ignore" })
-      try { process.kill(pid, "SIGTERM"); killed++ } catch {}
-    }
+    if (pid !== null) { killTree(pid); killed++ }
     rm(pidf)
     // Housekeeping only. Anything this misses -- or that an unreapable worker
     // writes a moment from now -- carries the old epoch and will never be read.
@@ -288,5 +285,7 @@ export const USAGE = `kibitz — Codex as a background advisory process for Clau
   kibitzer uninstall [project|user]  remove them again
   kibitzer statusline [cwd]    pending-count segment for the status line
 
+  kibitzer channel             MCP channel server; pushes advice without waiting
+                               for a tool call (opt-in, see README)
   kibitzer hook <Event>        hook entrypoint; reads the payload on stdin
   kibitzer worker <cwd> <sid> [transcript]   one Codex cycle (detached by the hook)`

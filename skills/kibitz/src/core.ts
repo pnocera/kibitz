@@ -130,6 +130,55 @@ export function verifiedWorkerPid(p: string): number | null {
   return pid
 }
 
+/** Terminate a worker and everything it started.
+ *
+ *  `pkill -P` is one level deep, and the chain is worker -> timeout -> codex,
+ *  so it can leave Codex running for the rest of its timeout. Workers are
+ *  spawned under setsid, which makes each one a process-group leader, so
+ *  signalling the negative pid reaches the whole tree in one call.
+ *
+ *  Only when it really is the leader: a worker started directly from a shell
+ *  shares that shell's group, and signalling that group would kill the caller. */
+export function killTree(pid: number) {
+  // Compare against OUR group, not against the pid. setsid makes the outer
+  // process the leader and the worker that records its pid is the inner one
+  // flock launched, so pgid never equals pid and a `pgid === pid` test would
+  // make this branch unreachable. A different group means the worker was
+  // detached and the whole group is ours to end; the same group means it was
+  // started from the caller's shell, where signalling the group kills the
+  // caller.
+  const pgid = pgidOf(pid)
+  if (Number.isInteger(pgid) && pgid > 0 && pgid !== pgidOf(process.pid)) {
+    try { process.kill(-pgid, "SIGTERM"); return } catch {}
+  }
+  // Not a group leader (a worker started straight from a shell): walk the tree
+  // instead. `pkill -P` is one level, and the chain is worker -> timeout ->
+  // codex, so one level can leave Codex behind.
+  for (const kid of descendants(pid)) try { process.kill(kid, "SIGTERM") } catch {}
+  try { process.kill(pid, "SIGTERM") } catch {}
+}
+
+function pgidOf(pid: number): number {
+  const stat = read(`/proc/${pid}/stat`)
+  if (!stat) return NaN
+  return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2])
+}
+
+/** Every descendant pid, deepest first, via /proc. */
+function descendants(pid: number): number[] {
+  const out: number[] = []
+  const visit = (p: number, depth: number) => {
+    if (depth > 8) return
+    const r = spawnSync("pgrep", ["-P", String(p)], { encoding: "utf8" })
+    for (const l of (r.stdout ?? "").split("\n")) {
+      const k = Number(l.trim())
+      if (Number.isInteger(k) && k > 0) { visit(k, depth + 1); out.push(k) }
+    }
+  }
+  visit(pid, 0)
+  return out
+}
+
 // ---------------------------------------------------------------- state ----
 //
 // The opt-out boundary is a value, not a timing window.

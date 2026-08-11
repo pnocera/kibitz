@@ -2,13 +2,13 @@
 // This is the hot path -- it runs on every tool call, inside Claude Code's 2s
 // budget, alongside whatever other hooks the operator has registered.
 
-import { spawn, spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import {
   BIN, LEASE_SECONDS, MAX_PER_DRAIN, MIN_INTERVAL, SENTINEL,
   ageMinutes, appendSync, epochOf, initSess, isEnabled, isMuted, isNavigation,
-  isQuiet, isoNow, listJson, read, readState, rm, sessDir, verifiedWorkerPid,
+  isQuiet, isoNow, killTree, listJson, read, readState, rm, sessDir, verifiedWorkerPid,
 } from "./core.ts"
 
 const BANNER = `Advisory from Codex, an independent observer of this session.
@@ -179,13 +179,10 @@ export function runHook(event: string, raw: string): number {
       break
     case "SessionEnd": {
       const pid = verifiedWorkerPid(path.join(sessDir(cwd, sid), "worker.pid"))
-      if (pid) {
-        // Children first, as `off` does. The worker waits synchronously on
-        // `timeout codex`, so signalling only the worker leaves Codex orphaned
-        // and running for up to CODEX_TIMEOUT after the session is gone.
-        try { spawnSync("pkill", ["-TERM", "-P", String(pid)], { stdio: "ignore" }) } catch {}
-        try { process.kill(pid, "SIGTERM") } catch {}
-      }
+      // The whole tree: the worker waits on `timeout codex`, so signalling one
+      // level leaves Codex running for the rest of its timeout after the
+      // session is gone.
+      if (pid) killTree(pid)
       break
     }
   }

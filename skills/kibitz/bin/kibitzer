@@ -20,6 +20,7 @@ import {
 } from "../src/commands.ts"
 import { runHook } from "../src/hooks.ts"
 import { cmdInstall, cmdLink, cmdUninstall } from "../src/install.ts"
+import { runChannel } from "../src/channel.ts"
 import { cmdWorker } from "../src/worker.ts"
 
 const [cmd, ...rest] = process.argv.slice(2)
@@ -57,6 +58,8 @@ try {
     case "statusline": status = cmdStatusline(rest[0]); break
     case "doctor":     status = cmdDoctor(); break
     case "worker":     status = cmdWorker(rest[0] ?? "", rest[1] ?? "", rest[2], rest[3]); break
+    // Long-lived: serves MCP on stdio until Claude Code closes it.
+    case "channel":    runChannel(); await new Promise(() => {}); break
     case undefined:
     case "-h":
     case "--help":

@@ -162,19 +162,43 @@ the real invocation and fails if this regresses.
 Injected blocks carry a provenance banner, Codex runs read-only, and advisory text never reaches a
 shell.
 
+## Pushing instead of waiting (optional)
+
+By default an advisory waits for your next tool call. That is seconds during active work, but an
+advisory produced while the session sits idle waits until you do something.
+
+kibitz also ships a Claude Code **channel** — an MCP server that pushes advisories into the running
+session. Channels are a research preview and custom ones are not allowlisted, so it needs a launch
+flag:
+
+```bash
+claude --dangerously-load-development-channels server:kibitz
+```
+
+It is a **second consumer of the same queue**, not a replacement. It claims records by the same
+atomic rename and writes the same ledger, so the two can never both deliver one advisory, and
+whichever is running does the work. With no channel loaded nothing changes.
+
+It does not add an acknowledgement. Claude Code does not acknowledge channel notifications, and an
+unregistered or policy-blocked channel drops them silently, so the contract is unchanged: lose
+rather than duplicate, with `advice.log` as the record of truth.
+
+One limit worth knowing: the server is a subprocess of one session but is not told which, so it
+binds to the project's current session. Run it in only one session per checkout.
+
 ## Tests
 
 ```bash
 bash tests/run-tests.sh
 ```
 
-133 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
+144 tests: opt-in and immediate-off (including reaping an in-flight cycle and never signalling a
 reused PID), the off/publication and drain/off races, quiet, duplicate suppression on replay,
 non-Latin fingerprinting, the tap and its debounce, concurrent tap writes, bounded transcript
 reading, invocation confinement, the plugin package (manifest, hook events, relocatable
 `${CLAUDE_PLUGIN_ROOT}` paths), install/uninstall merge safety including hooks nested beside yours,
 upgrade from the two-file state layout, epoch boundaries across off/on, mute at both publication and
-delivery, and hot-path latency.
+delivery, the channel's MCP handshake and its parity with the hook drain, and hot-path latency.
 
 `tests/smoke-plugin.sh` is separate and opt-in: it installs into the real layout, starts a headless
 Claude Code, and asserts a hook actually fired. It needs an authenticated CLI and a couple of

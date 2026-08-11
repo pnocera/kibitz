@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "kibitz": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/kibitzer",
+      "args": [
+        "channel"
+      ]
+    }
+  }
+}
