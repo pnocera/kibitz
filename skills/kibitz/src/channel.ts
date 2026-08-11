@@ -30,7 +30,7 @@ import * as path from "node:path"
 import {
   LEASE_SECONDS, MAX_PER_DRAIN, SENTINEL,
   ageMinutes, appendSync, epochOf, isEnabled, isMuted, isQuiet,
-  listJson, read, rm, sessDir,
+  listJson, procStart, read, rm, sessDir,
 } from "./core.ts"
 
 // Validated, not raw Number(): 0, NaN or text would become a near-zero interval
@@ -108,14 +108,25 @@ let warnedUnbound = false
  *  let the hook drain deliver, which is always correct if less immediate. */
 function boundSession(): string | null {
   if (process.env.KIBITZ_SESSION) return process.env.KIBITZ_SESSION
-  const reg = path.join(os.homedir(), ".claude", "sessions")
+  // CLAUDE_CONFIG_DIR relocates the whole config, including this registry, and
+  // the plugin smoke test already runs that way.
+  const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude")
+  const reg = path.join(cfg, "sessions")
   let pid = process.pid
   for (let depth = 0; depth < 12 && pid > 1; depth++) {
     const rec = read(path.join(reg, `${pid}.json`))
     if (rec) {
       try {
-        const sid = JSON.parse(rec)?.sessionId
-        if (typeof sid === "string" && sid) return sid
+        const j = JSON.parse(rec)
+        // Identity, not just a filename: a stale record whose pid the kernel has
+        // reused would otherwise bind this channel to a dead session -- the same
+        // wrong-recipient failure, arrived at from the other direction. The
+        // registry stores procStart precisely so this can be checked.
+        const live = procStart(pid)
+        const same = j?.procStart === undefined || String(j.procStart) === String(live)
+        const rightPid = j?.pid === undefined || Number(j.pid) === pid
+        if (typeof j?.sessionId === "string" && j.sessionId && same && rightPid)
+          return j.sessionId
       } catch {}
     }
     const stat = read(`/proc/${pid}/stat`)

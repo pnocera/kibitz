@@ -616,7 +616,9 @@ check "KIBITZ_SESSION binds it explicitly and delivery resumes" \
   'grep >/dev/null "must not cross sessions" "$WORK/chanbound.out"' "$(cat "$WORK/chanbound.out")"
 # And the registry path: a session record naming this pid's ancestor binds it.
 mkdir -p "$EMPTYHOME/.claude/sessions"
-jq -n --arg s "$SID" '{sessionId:$s}' >"$EMPTYHOME/.claude/sessions/$$.json"
+PROCSTART="$(awk '{print $22}' /proc/$$/stat)"
+jq -n --arg s "$SID" --argjson p "$$" --arg st "$PROCSTART" \
+  '{sessionId:$s, pid:$p, procStart:$st}' >"$EMPTYHOME/.claude/sessions/$$.json"
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-reg "bound through the registry"
 ( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
@@ -624,6 +626,32 @@ plant chan-reg "bound through the registry"
   >"$WORK/chanreg.out" 2>/dev/null
 check "Claude's session registry binds the channel without configuration" \
   'grep >/dev/null "bound through the registry" "$WORK/chanreg.out"' "$(cat "$WORK/chanreg.out")"
+
+# A stale record whose pid the kernel reused must not bind: same wrong-recipient
+# failure, reached from the other direction.
+jq -n --arg s "$SID" --argjson p "$$" --arg st "999999999" \
+  '{sessionId:$s, pid:$p, procStart:$st}' >"$EMPTYHOME/.claude/sessions/$$.json"
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+plant chan-stale "must not bind through a stale record"
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+  >"$WORK/chanstale.out" 2>/dev/null
+check "a stale registry record does not bind the channel" \
+  '! grep >/dev/null "must not bind through a stale record" "$WORK/chanstale.out"' \
+  "$(cat "$WORK/chanstale.out")"
+
+# CLAUDE_CONFIG_DIR relocates the registry, and the channel must follow it.
+RELOC="$WORK/reloc"; mkdir -p "$RELOC/sessions"
+jq -n --arg s "$SID" --argjson p "$$" --arg st "$PROCSTART" \
+  '{sessionId:$s, pid:$p, procStart:$st}' >"$RELOC/sessions/$$.json"
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+plant chan-reloc "bound through a relocated config"
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" CLAUDE_CONFIG_DIR="$RELOC" \
+      KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) >"$WORK/chanreloc.out" 2>/dev/null
+check "CLAUDE_CONFIG_DIR relocates the registry the channel reads" \
+  'grep >/dev/null "bound through a relocated config" "$WORK/chanreloc.out"' \
+  "$(cat "$WORK/chanreloc.out")"
 
 # `off` landing mid-drain must stop the channel too, not only the hook.
 "$ADV" on "$WORK" >/dev/null
