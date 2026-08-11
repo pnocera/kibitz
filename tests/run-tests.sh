@@ -499,10 +499,18 @@ CPID=$!
 # Wait for the claim itself, not for a guessed interval: a sleep races the hook
 # on a loaded host, and this test is about a specific ordering, so it must not
 # depend on timing luck.
-for _ in $(seq 1 200); do
-  [ -n "$(find "$(sdir)/delivered" -type f -newer "$WORK/claimmark" 2>/dev/null)" ] && break
+CLAIMSEEN=no
+for _ in $(seq 1 50); do
+  if [ -n "$(find "$(sdir)/delivered" -type f -newer "$WORK/claimmark" 2>/dev/null)" ]; then
+    CLAIMSEEN=yes; break
+  fi
   sleep 0.02
 done
+# Report a failed handshake as itself. Falling through silently would run `off`
+# after the delay had already elapsed, and the ordering test would then report a
+# behaviour regression that never happened.
+check "the claim was observed before off was sent" '[ "$CLAIMSEEN" = yes ]' \
+  "no new marker within 1s; the test never reached the window it is about"
 "$ADV" off "$WORK" >/dev/null    # lands after the claim, before the emit
 wait "$CPID" 2>/dev/null
 check "off after the claim shows nothing" \
@@ -1239,6 +1247,12 @@ PATH="$FAKEBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "an advisory the log rejected is offered again once the log recovers" \
   '[ "$(grep -c "captured" "$(sdir)/advice.log")" -gt "$BEFORE_LOG" ]' \
   "still suppressed after recovery; seen was written before the log"
+# ...and it is genuinely deliverable, not merely logged. Logging it and then
+# dropping it at the outbox write would pass the assertion above.
+check "the recovered advisory reaches Claude, not just the log" \
+  'printf "%s" "$(fire PreToolUse)" | jq -r ".hookSpecificOutput.additionalContext" |
+     grep >/dev/null "captured"' \
+  "logged after recovery but never published"
 
 echo
 echo "hot path"
