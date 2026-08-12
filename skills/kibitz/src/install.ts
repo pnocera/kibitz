@@ -7,7 +7,8 @@
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { BIN, HOME, OURS_RE, exists, mkdirp, read, rm } from "./core.ts"
+import { spawnSync } from "node:child_process"
+import { BIN, HOME, OURS_RE, exists, mkdirp, read, rm, which } from "./core.ts"
 
 const err = (s: string) => process.stderr.write(s + "\n")
 const out = (s: string) => process.stdout.write(s + "\n")
@@ -19,6 +20,13 @@ const targetFor = (scope: string): string | null =>
   : null
 
 const templateFor = (scope: string) => scope === "codex-user" ? "codex-hooks.json" : "hooks.json"
+
+const CHANNEL_NAME = "kibitz-channel"
+
+// Claude's user MCP registry is deliberately not inside ~/.claude: when
+// CLAUDE_CONFIG_DIR is unset it is ~/.claude.json, otherwise it is alongside
+// the configured directory. Keep this separate from settings.json above.
+const channelConfigPath = () => path.join(process.env.CLAUDE_CONFIG_DIR ?? os.homedir(), ".claude.json")
 
 /** A user-scope install writes this checkout's absolute path into the global
  *  settings, so it must not point at somewhere transient. */
@@ -38,9 +46,116 @@ function stripOurs(entries: HookEntry[]): HookEntry[] {
     .filter(e => (e.hooks ?? []).length > 0)
 }
 
-export function cmdInstall(scope = "project", force?: string): number {
+interface ChannelServer { type?: unknown; command?: unknown; args?: unknown }
+
+/** Recognise a channel we can safely replace. Realpath covers npx skills'
+ * Claude-to-agents symlink; the path suffix lets uninstall repair a record
+ * after the old checkout was removed. */
+function isOurChannel(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object") return false
+  const server = entry as ChannelServer
+  if (server.type !== undefined && server.type !== "stdio") return false
+  if (!Array.isArray(server.args) || server.args.length !== 1 || server.args[0] !== "channel") return false
+  if (typeof server.command !== "string") return false
+  try {
+    if (fs.realpathSync(server.command) === fs.realpathSync(BIN)) return true
+  } catch {}
+  return /(?:^|\/)bin\/kibitzer$/.test(server.command)
+}
+
+function readChannelEntry(): { exists: boolean; entry: unknown } | null {
+  const target = channelConfigPath()
+  if (!exists(target)) return { exists: false, entry: undefined }
+  let config: any
+  try { config = JSON.parse(read(target) ?? "") } catch {
+    err(`kibitzer: ${target} is not valid JSON — refusing to touch it`); return null
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    err(`kibitzer: ${target} is not a JSON object — refusing to touch it`); return null
+  }
+  if (config.mcpServers !== undefined && (!config.mcpServers || typeof config.mcpServers !== "object" || Array.isArray(config.mcpServers))) {
+    err(`kibitzer: ${target} has a non-object mcpServers map — refusing to touch it`); return null
+  }
+  return { exists: Object.prototype.hasOwnProperty.call(config.mcpServers ?? {}, CHANNEL_NAME), entry: config.mcpServers?.[CHANNEL_NAME] }
+}
+
+function runClaudeMcp(args: string[]): boolean {
+  if (!which("claude")) {
+    err("kibitzer: Claude Code CLI is required to register the Claude channel (claude is not on PATH)")
+    return false
+  }
+  const result = spawnSync("claude", ["mcp", ...args], { stdio: "inherit" })
+  if (result.status === 0) return true
+  err(`kibitzer: Claude MCP command failed${result.status === null ? "" : ` (exit ${result.status})`}`)
+  return false
+}
+
+function channelUsage(): number {
+  err("usage: kibitzer install claude-channel-user [--force] [--replace-channel]")
+  return 2
+}
+
+function portableChannelHome(force: boolean): boolean {
+  if (isPortableHome() || force) return true
+  err("kibitzer: refusing a user-scope channel registration from a transient location.")
+  err(`  This copy lives at: ${HOME}`)
+  err("  Install kibitz somewhere stable, or re-run with --force if this path is permanent.")
+  return false
+}
+
+/** Register through Claude's supported writer, never by modifying its live
+ * .claude.json ourselves. The inspection is solely a narrow ownership gate. */
+function cmdInstallClaudeChannel(options: string[]): number {
+  if (options.some(v => v !== "--force" && v !== "--replace-channel")) return channelUsage()
+  if (!portableChannelHome(options.includes("--force"))) return 1
+  const current = readChannelEntry()
+  if (!current) return 1
+  if (current.exists && !isOurChannel(current.entry) && !options.includes("--replace-channel")) {
+    err(`kibitzer: ${CHANNEL_NAME} already belongs to another MCP server in ${channelConfigPath()}`)
+    err("  refusing to replace it; re-run with --replace-channel if that is intentional")
+    return 1
+  }
+  // Claude mcp add deliberately rejects duplicate names. Removing first is
+  // safe only after the exact ownership gate above (or an explicit override).
+  if (current.exists && !runClaudeMcp(["remove", "--scope", "user", CHANNEL_NAME])) return 1
+  if (!runClaudeMcp(["add", "--scope", "user", CHANNEL_NAME, "--", BIN, "channel"])) return 1
+  const next = readChannelEntry()
+  if (!next || !next.exists || !isOurChannel(next.entry)) {
+    err(`kibitzer: Claude did not register the expected ${CHANNEL_NAME} entry in ${channelConfigPath()}`)
+    return 1
+  }
+  out(`kibitzer: Claude channel registered in ${channelConfigPath()} (via Claude Code)`)
+  out(`  Restart Claude with: claude --dangerously-load-development-channels server:${CHANNEL_NAME}`)
+  return 0
+}
+
+function cmdUninstallClaudeChannel(options: string[]): number {
+  if (options.length > 0) { err("usage: kibitzer uninstall claude-channel-user"); return 2 }
+  const current = readChannelEntry()
+  if (!current) return 1
+  if (!current.exists) { out(`kibitzer: no ${CHANNEL_NAME} registration in ${channelConfigPath()}`); return 0 }
+  if (!isOurChannel(current.entry)) {
+    err(`kibitzer: ${CHANNEL_NAME} in ${channelConfigPath()} is not this kibitzer; leaving it untouched`)
+    return 1
+  }
+  if (!runClaudeMcp(["remove", "--scope", "user", CHANNEL_NAME])) return 1
+  const next = readChannelEntry()
+  if (!next || next.exists) {
+    err(`kibitzer: Claude did not remove ${CHANNEL_NAME} from ${channelConfigPath()}`)
+    return 1
+  }
+  out(`kibitzer: Claude channel removed from ${channelConfigPath()}`)
+  return 0
+}
+
+export function cmdInstall(scope = "project", options: string[] = []): number {
+  if (scope === "claude-channel-user") return cmdInstallClaudeChannel(options)
+  const force = options[0]
   const target = targetFor(scope)
-  if (!target) { err("usage: kibitzer install [claude-project|claude-user|codex-user] [--force]"); return 2 }
+  if (!target || options.length > 1 || (force !== undefined && force !== "--force")) {
+    err("usage: kibitzer install [claude-project|claude-user|codex-user|claude-channel-user] [--force]")
+    return 2
+  }
 
   if ((scope === "user" || scope === "claude-user" || scope === "codex-user") && !isPortableHome() && force !== "--force") {
     err("kibitzer: refusing a user-scope install from a transient location.")
@@ -109,9 +224,10 @@ export function cmdInstall(scope = "project", force?: string): number {
   return 0
 }
 
-export function cmdUninstall(scope = "project"): number {
+export function cmdUninstall(scope = "project", options: string[] = []): number {
+  if (scope === "claude-channel-user") return cmdUninstallClaudeChannel(options)
   const target = targetFor(scope)
-  if (!target) { err("usage: kibitzer uninstall [claude-project|claude-user|codex-user]"); return 2 }
+  if (!target || options.length > 0) { err("usage: kibitzer uninstall [claude-project|claude-user|codex-user|claude-channel-user]"); return 2 }
   if (!exists(target)) { out(`kibitzer: nothing at ${target}`); return 0 }
 
   let cur: any

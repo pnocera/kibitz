@@ -190,11 +190,10 @@ advisory produced while the session sits idle waits until you do something.
 
 kibitz also ships a Claude Code **channel** — an MCP server that pushes advisories into the running
 session. A skills-directory plugin is loaded for MCP but is not a channel-installable marketplace
-plugin, so register this channel once as a named user MCP server:
+plugin, so register the named user channel once through kibitz:
 
 ```bash
-claude mcp add --scope user kibitz-channel -- \
-  ~/.claude/skills/kibitz/bin/kibitzer channel
+kibitzer install claude-channel-user
 ```
 
 Then restart Claude with the named development channel:
@@ -203,10 +202,17 @@ Then restart Claude with the named development channel:
 claude --dangerously-load-development-channels server:kibitz-channel
 ```
 
-Accept the development-channel confirmation. `/mcp` should show
+The command uses Claude Code's own MCP configuration command; it honours
+`CLAUDE_CONFIG_DIR`, refuses another server named `kibitz-channel`, and never
+writes Claude's live config itself. Use `--replace-channel` only to deliberately
+take over that name. Accept the development-channel confirmation. `/mcp` should show
 `kibitz-channel` connected. Do not pass `plugin:kibitz@skills-dir` or either
 `plugin:kibitz:kibitz` form to the channel flag: those identify the skills-dir
 plugin/MCP server but are not an installed channel plugin.
+
+The launch flag is an experimental Claude Code feature and remains per-session;
+the installer cannot make it permanent. Remove the registration later with
+`kibitzer uninstall claude-channel-user`.
 
 It is a **second consumer of the same queue**, not a replacement. It takes the same atomic per-id
 claim, and that claim — not the ledger, which is a readable record and may fail to be written — is

@@ -94,8 +94,8 @@ try {
     case "log":        status = runControls(false, () => cmdLog(rest[0], rest[1])); break
     case "pane":       status = runControls(false, () => cmdPane(rest[0])); break
     case "lint":       status = cmdLint(rest[0]); break
-    case "install":    status = cmdInstall(rest[0], rest[1]); break
-    case "uninstall":  status = cmdUninstall(rest[0]); break
+    case "install":    status = cmdInstall(rest[0], rest.slice(1)); break
+    case "uninstall":  status = cmdUninstall(rest[0], rest.slice(1)); break
     case "link":       status = cmdLink(rest[0], rest[1]); break
     case "advise-now": status = runControls(false, () => cmdAdviseNow(rest[0])); break
     case "mute":       status = runControls(true, () => cmdMute(rest[0], rest[1])); break

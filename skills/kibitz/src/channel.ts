@@ -17,7 +17,7 @@
 // with advice.log as the record of truth.
 //
 // Requires a launch flag, because custom channels are a research preview:
-//   claude mcp add --scope user kibitz-channel -- /path/to/kibitzer channel
+//   kibitzer install claude-channel-user
 //   claude --dangerously-load-development-channels server:kibitz-channel
 //
 // Session binding: Claude Code does not tell an MCP server which session it

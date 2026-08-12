@@ -329,8 +329,10 @@ export const USAGE = `kibitz — cross-host background advisory
   kibitzer link [dir]          put a \`kibitzer\` command on your PATH (~/.local/bin)
   kibitzer install [claude-project|claude-user|codex-user] [--force]
                                register hooks (bare install means claude-project)
-  kibitzer uninstall [claude-project|claude-user|codex-user]
-                               remove only kibitzer hook entries
+  kibitzer install claude-channel-user [--force] [--replace-channel]
+                               register the named Claude development channel
+  kibitzer uninstall [claude-project|claude-user|codex-user|claude-channel-user]
+                               remove only kibitzer-owned registrations
   kibitzer statusline [cwd]    pending-count segment for the status line
 
   kibitzer channel             MCP channel server; pushes advice without waiting

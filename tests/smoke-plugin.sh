@@ -176,11 +176,18 @@ fi
 # launched with the development-channel flag. Unit tests can prove the queue
 # logic and the .mcp.json shape, but not that Claude discovers and launches it.
 if [ "${SMOKE_CHANNEL:-0}" = "1" ]; then
+  echo "smoke: channel phase — registering the managed user channel…"
+  if ! CLAUDE_CONFIG_DIR="$CFG" "$CFG/skills/kibitz/bin/kibitzer" install claude-channel-user; then
+    echo "smoke: channel FAIL — kibitzer could not register the Claude user channel." >&2
+    exit 1
+  fi
+  jq -e --arg bin "$TEST_HOME/.agents/skills/kibitz/bin/kibitzer" \
+    '.mcpServers["kibitz-channel"] | (.type == "stdio" and .command == $bin and .args == ["channel"])' \
+    "$CFG/.claude.json" >/dev/null || {
+      echo "smoke: channel FAIL — managed registration is missing from Claude's user config." >&2
+      exit 1
+    }
   echo "smoke: channel phase — starting a session, then seeding ITS queue…"
-  CHANNEL_CONFIG="$ROOT/kibitz-channel.json"
-  jq -n --arg bin "$CFG/skills/kibitz/bin/kibitzer" \
-    '{mcpServers: {"kibitz-channel": {type: "stdio", command: $bin, args: ["channel"], env: {}}}}' \
-    >"$CHANNEL_CONFIG" || { echo "smoke: could not write channel MCP config" >&2; exit 1; }
   SD="$STATE/projects/$H/sessions"
   before="$(ls "$SD" 2>/dev/null | sort | tr '\n' ' ')"
   # The channel binds to the session that owns it, so the advisory has to be
@@ -188,7 +195,6 @@ if [ "${SMOKE_CHANNEL:-0}" = "1" ]; then
   # nothing, and would fail even when loading works correctly.
   ( cd "$PROJ" && CLAUDE_CONFIG_DIR="$CFG" ADVISOR_STATE_ROOT="$STATE" \
       timeout 180 claude -p "Run this bash command: sleep 40" \
-      --mcp-config "$CHANNEL_CONFIG" \
       --dangerously-load-development-channels "server:kibitz-channel" \
       --permission-mode bypassPermissions >"$PROJ/chan.txt" 2>&1 ) &
   CLAUDE_PID=$!

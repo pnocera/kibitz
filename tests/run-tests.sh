@@ -1088,6 +1088,111 @@ check "uninstall removes only our hooks" \
    ! jq -r ".hooks | tostring" "$INSTDIR/.claude/settings.json" | grep >/dev/null "advisor hook"'
 
 echo
+echo "Claude channel installation"
+
+# Claude owns .claude.json and is its only writer. A small compatible stand-in
+# makes this suite test our ownership gate and host-CLI delegation without
+# needing credentials or touching a real user config.
+CHROOT="$WORK/channel-install"
+AGENTSKILL="$CHROOT/.agents/skills/kibitz"
+CLAUDESKILL="$CHROOT/.claude/skills/kibitz"
+CHCFG="$CHROOT/config"
+FAKEBIN="$CHROOT/fake-bin"
+mkdir -p "$AGENTSKILL" "$CHCFG" "$FAKEBIN" "$(dirname "$CLAUDESKILL")"
+cp -a "$PLUG/." "$AGENTSKILL/"
+ln -s ../../../.agents/skills/kibitz "$CLAUDESKILL"
+cat >"$FAKEBIN/claude" <<'FAKECLAUDE'
+#!/usr/bin/env bash
+set -eu
+[ "${1:-}" = mcp ] || exit 64
+action="${2:-}"; shift 2
+[ "${1:-}" = --scope ] && shift 2
+name="${1:-}"; shift
+cfg="${CLAUDE_CONFIG_DIR:?}/.claude.json"
+mkdir -p "$(dirname "$cfg")"
+[ -f "$cfg" ] || printf '{}\n' >"$cfg"
+printf '%s %s\n' "$action" "$name" >>"${KIBITZ_FAKE_CLAUDE_LOG:?}"
+case "$action" in
+  add)
+    [ "${1:-}" = -- ] && shift
+    bin="${1:-}"; arg="${2:-}"
+    tmp="$cfg.fake.$$"
+    jq --arg n "$name" --arg b "$bin" --arg a "$arg" \
+      '.mcpServers //= {} | .mcpServers[$n] = {type:"stdio", command:$b, args:[$a], env:{}}' "$cfg" >"$tmp"
+    mv "$tmp" "$cfg"
+    ;;
+  remove)
+    tmp="$cfg.fake.$$"
+    jq --arg n "$name" 'del(.mcpServers[$n])' "$cfg" >"$tmp"
+    mv "$tmp" "$cfg"
+    ;;
+  *) exit 64 ;;
+esac
+FAKECLAUDE
+chmod +x "$FAKEBIN/claude"
+CHENV="PATH=$FAKEBIN:$PATH CLAUDE_CONFIG_DIR=$CHCFG KIBITZ_FAKE_CLAUDE_LOG=$CHROOT/claude.log"
+
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" >"$WORK/channel-install.out" 2>&1
+check "channel install delegates registration to Claude's user writer" \
+  'grep >/dev/null "add kibitz-channel" "$CHROOT/claude.log"' "$(cat "$WORK/channel-install.out")"
+check "channel install honours CLAUDE_CONFIG_DIR and writes the exact stdio entry" \
+  'jq -e --arg b "$AGENTSKILL/bin/kibitzer" '\'' .mcpServers["kibitz-channel"] | (.type == "stdio" and .command == $b and .args == ["channel"]) '\'' "$CHCFG/.claude.json" >/dev/null'
+
+# The documented Claude skill path is a symlink to the agents copy. It remains
+# owned across the upgrade and gets rewritten to the canonical executable.
+jq -n --arg b "$CLAUDESKILL/bin/kibitzer" \
+  '{mcpServers:{"kibitz-channel":{command:$b,args:["channel"]}}}' >"$CHCFG/.claude.json"
+: >"$CHROOT/claude.log"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" >/dev/null 2>&1
+check "channel install recognises the npx Claude symlink as its own registration" \
+  'grep >/dev/null "remove kibitz-channel" "$CHROOT/claude.log" && grep >/dev/null "add kibitz-channel" "$CHROOT/claude.log"'
+check "channel install refreshes an owned symlink record to the real executable" \
+  'jq -e --arg b "$AGENTSKILL/bin/kibitzer" '\''.mcpServers["kibitz-channel"].command == $b'\'' "$CHCFG/.claude.json" >/dev/null'
+
+jq -n '{mcpServers:{"kibitz-channel":{type:"stdio",command:"/bin/true",args:["channel"]}}}' >"$CHCFG/.claude.json"
+: >"$CHROOT/claude.log"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" >/dev/null 2>&1
+CHRC=$?
+check "channel install refuses a foreign same-name server" '[ "$CHRC" -ne 0 ] && [ ! -s "$CHROOT/claude.log" ]'
+check "foreign channel registration survives refusal unchanged" \
+  'jq -e '\''.mcpServers["kibitz-channel"].command == "/bin/true"'\'' "$CHCFG/.claude.json" >/dev/null'
+
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user --replace-channel" >/dev/null 2>&1
+check "explicit channel replacement is delegated as remove then add" \
+  '[ "$(cat "$CHROOT/claude.log")" = $'\''remove kibitz-channel\nadd kibitz-channel'\'' ]' "$(cat "$CHROOT/claude.log")"
+
+printf '{ bad json\n' >"$CHCFG/.claude.json"
+: >"$CHROOT/claude.log"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" >/dev/null 2>&1
+CHRC=$?
+check "channel install refuses malformed Claude config without invoking Claude" \
+  '[ "$CHRC" -ne 0 ] && [ ! -s "$CHROOT/claude.log" ]'
+
+jq -n --arg b "$CHROOT/gone/bin/kibitzer" \
+  '{mcpServers:{"kibitz-channel":{command:$b,args:["channel"]}}}' >"$CHCFG/.claude.json"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" uninstall claude-channel-user" >/dev/null 2>&1
+check "channel uninstall removes a stale but recognisable kibitzer path" \
+  'jq -e '\''.mcpServers["kibitz-channel"] | not'\'' "$CHCFG/.claude.json" >/dev/null'
+
+jq -n '{mcpServers:{"kibitz-channel":{type:"stdio",command:"/bin/true",args:["channel"]}}}' >"$CHCFG/.claude.json"
+: >"$CHROOT/claude.log"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" uninstall claude-channel-user" >/dev/null 2>&1
+CHRC=$?
+check "channel uninstall leaves a foreign registration untouched" \
+  '[ "$CHRC" -ne 0 ] && [ ! -s "$CHROOT/claude.log" ] &&
+   [ "$(jq -r '\''.mcpServers["kibitz-channel"].command'\'' "$CHCFG/.claude.json")" = /bin/true ]'
+
+LOCALSKILL="$CHROOT/project-copy"
+cp -a "$PLUG" "$LOCALSKILL"
+printf '{}\n' >"$CHCFG/.claude.json"; : >"$CHROOT/claude.log"
+eval "$CHENV \"$LOCALSKILL/bin/kibitzer\" install claude-channel-user" >/dev/null 2>&1
+CHRC=$?
+check "channel install applies the transient-path guard" '[ "$CHRC" -ne 0 ] && [ ! -s "$CHROOT/claude.log" ]'
+eval "$CHENV \"$LOCALSKILL/bin/kibitzer\" install claude-channel-user --force" >/dev/null 2>&1
+check "channel --force only overrides the transient-path declaration" \
+  'grep >/dev/null "add kibitz-channel" "$CHROOT/claude.log"'
+
+echo
 echo "upgrade from the two-file state layout"
 
 # An install enabled under the old scheme has `enabled` and no `state`. Without
