@@ -1,5 +1,6 @@
 reviews/
 qa/
+.codegraph/
 *.advisor-backup
 *.kibitz-backup
 .claude/settings.json
