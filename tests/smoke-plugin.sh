@@ -8,7 +8,7 @@
 # plugin manifest, hooks/hooks.json, the install layout, or path resolution.
 #
 #   bash tests/smoke-plugin.sh --host claude
-#   CODEX_API_KEY=... bash tests/smoke-plugin.sh --host codex
+#   bash tests/smoke-plugin.sh --host codex
 #
 # Why it exists: the package combines ordinary skill discovery (SKILL.md in a
 # skills directory) with plugin hook discovery (.claude-plugin + hooks/hooks.json).
@@ -31,17 +31,26 @@ fi
 
 if [ "$host" = codex ]; then
   command -v codex >/dev/null || { echo "smoke: codex not on PATH"; exit 2; }
-  [ -n "${CODEX_API_KEY:-}" ] || {
-    echo "smoke: Codex uses a disposable CODEX_HOME, so set CODEX_API_KEY for this interactive smoke." >&2
+  AUTH_SOURCE="${KIBITZ_CODEX_AUTH_JSON:-${CODEX_HOME:-$HOME/.codex}/auth.json}"
+  [ -r "$AUTH_SOURCE" ] || {
+    echo "smoke: no readable local Codex credential at $AUTH_SOURCE." >&2
+    echo "  Sign in with 'codex --login', or set KIBITZ_CODEX_AUTH_JSON to its auth.json path." >&2
     exit 2
   }
 
+  umask 077
   ROOT="$(mktemp -d)"
   TEST_HOME="$ROOT/home"
   CODEX_ROOT="$ROOT/codex"
   PROJ="$ROOT/project"
   trap 'rm -rf "$ROOT"' EXIT
   mkdir -p "$TEST_HOME/.agents/skills" "$PROJ"
+  # CODEX_HOME also owns auth.json. Copy the already-authenticated local
+  # credential into the 0700 disposable root; it is never printed and the trap
+  # removes it after the trust smoke finishes.
+  mkdir -p "$CODEX_ROOT"
+  cp "$AUTH_SOURCE" "$CODEX_ROOT/auth.json"
+  chmod 600 "$CODEX_ROOT/auth.json"
   cp -r "$PLUG" "$TEST_HOME/.agents/skills/kibitz"
   INSTALLED="$TEST_HOME/.agents/skills/kibitz"
 

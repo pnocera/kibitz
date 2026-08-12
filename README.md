@@ -239,8 +239,8 @@ package has already shipped one install that validated perfectly and loaded noth
 
 `bash tests/smoke-npx-skills.sh` checks the published combined `npx skills` command in a clean
 home and verifies both installed layouts plus Codex hook registration. `--live` adds the two host
-loader checks; the Codex half is interactive and needs `CODEX_API_KEY` because it uses a disposable
-`CODEX_HOME` to require normal hook-trust approval.
+loader checks; the Codex half is interactive and uses an owner-only temporary copy of the existing
+local Codex login because it needs a disposable `CODEX_HOME` for normal hook-trust approval.
 
 Run `bash tests/dual-host.sh` with the legacy suite after changing host selection, Codex hooks,
 state roots, or runner boundaries. CI runs both suites.

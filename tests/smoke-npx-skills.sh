@@ -9,10 +9,6 @@ live=0
 if [ "${1:-}" = "--live" ]; then live=1; shift; fi
 [ "$#" -eq 0 ] || { echo "usage: bash tests/smoke-npx-skills.sh [--live]" >&2; exit 2; }
 command -v npx >/dev/null || { echo "smoke: npx not on PATH" >&2; exit 2; }
-if [ "$live" -eq 1 ] && [ -z "${CODEX_API_KEY:-}" ]; then
-  echo "smoke: --live needs CODEX_API_KEY for the disposable Codex session" >&2
-  exit 2
-fi
 
 ROOT="$(mktemp -d)"
 trap 'rm -rf "$ROOT"' EXIT
