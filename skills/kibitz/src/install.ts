@@ -50,17 +50,95 @@ interface ChannelServer { type?: unknown; command?: unknown; args?: unknown }
 
 /** Recognise a channel we can safely replace. Realpath covers npx skills'
  * Claude-to-agents symlink; the path suffix lets uninstall repair a record
- * after the old checkout was removed. */
+ * after the old checkout was removed.
+ *
+ * Resolution decides whenever it can. A command that resolves to a DIFFERENT
+ * executable is someone else's, however it is spelled -- sharing our filename is
+ * not evidence, and this predicate authorises deletion. The suffix is consulted
+ * only when the path resolves to nothing, which is the removed-checkout case it
+ * exists for: then a foreign record can be mistaken for ours only if its binary
+ * is also missing, also named bin/kibitzer, and also takes exactly ["channel"]. */
 function isOurChannel(entry: unknown): boolean {
   if (!entry || typeof entry !== "object") return false
   const server = entry as ChannelServer
   if (server.type !== undefined && server.type !== "stdio") return false
   if (!Array.isArray(server.args) || server.args.length !== 1 || server.args[0] !== "channel") return false
   if (typeof server.command !== "string") return false
+  let mine: string | null = null
+  try { mine = fs.realpathSync(BIN) } catch {}
   try {
-    if (fs.realpathSync(server.command) === fs.realpathSync(BIN)) return true
+    return fs.realpathSync(server.command) === mine
   } catch {}
   return /(?:^|\/)bin\/kibitzer$/.test(server.command)
+}
+
+/** Put back a registration this command removed. The refresh is two Claude
+ * commands with no transaction around them, so without this a transient CLI or
+ * config failure between them turns an upgrade into an outage: the operator is
+ * left with no channel at all, which is worse than the state they started in. */
+function restoreChannel(prev: ChannelServer): boolean {
+  if (typeof prev.command !== "string") return false
+  const args = Array.isArray(prev.args) ? prev.args.map(String) : []
+  if (!runClaudeMcp(["add", "--scope", "user", CHANNEL_NAME, "--", prev.command, ...args])) return false
+  // A zero exit is not the record being back, and neither is the name merely
+  // being occupied: a concurrent write could hold it. Claim a restore only when
+  // the config shows the entry we removed, or the operator is told their channel
+  // is safe when it is gone.
+  const back = readChannelEntry()
+  const got = back?.entry as ChannelServer | undefined
+  if (!back || !back.exists || got?.command !== prev.command) return false
+  if (JSON.stringify(got?.args ?? null) !== JSON.stringify(prev.args ?? null)) return false
+  // Restoration goes through the same writer as registration, which takes a
+  // command and arguments. Anything else the record carried is not reproduced,
+  // so report it rather than let "restored" imply more than was done.
+  const extra = Object.keys(prev).filter(k => k !== "type" && k !== "command" && k !== "args")
+  if (extra.length > 0) {
+    err(`kibitzer: the restored ${CHANNEL_NAME} record does not carry its previous ${extra.join(", ")}.`)
+    err(`  The entry it had was: ${JSON.stringify(prev)}`)
+  }
+  return true
+}
+
+/** An upgrade adds and overwrites files; it does not delete one the new version
+ * dropped. A copy installed before the channel became a named user server
+ * therefore keeps its .mcp.json, which auto-starts a second `kibitzer channel`.
+ * Claude never loads that one as a channel, so it claims advisories, marks them
+ * delivered and drops them silently -- the failure this registration exists to
+ * avoid. Remove our own stale file; report anything else rather than touch it. */
+function clearStalePluginChannel(): void {
+  const stale = path.join(HOME, ".mcp.json")
+  if (!exists(stale)) return
+  let config: any
+  try { config = JSON.parse(read(stale) ?? "") } catch { config = null }
+  const servers = config?.mcpServers
+  const names = servers && typeof servers === "object" && !Array.isArray(servers) ? Object.keys(servers) : []
+  const only = names.length === 1 && names[0] === "kibitz" ? servers.kibitz : null
+  // Shape alone is not ownership, even inside our own directory: match the exact
+  // command the superseded file shipped, or one that resolves to this executable.
+  const command = typeof only?.command === "string" ? only.command : null
+  let sameBin = false
+  if (command) {
+    try { sameBin = fs.realpathSync(command) === fs.realpathSync(BIN) } catch {}
+  }
+  const ours = only && typeof only === "object" &&
+    Array.isArray(only.args) && only.args.length === 1 && only.args[0] === "channel" &&
+    (command === "${CLAUDE_PLUGIN_ROOT}/bin/kibitzer" || sameBin)
+  if (!ours) {
+    err(`kibitzer: ${stale} is not the superseded plugin channel; leaving it in place`)
+    err("  If it starts a second 'kibitzer channel', advisories it claims are lost.")
+    return
+  }
+  rm(stale)
+  // rm swallows its errors. A read-only install or a permissions failure would
+  // otherwise be reported as the exact fix for a race that is still live.
+  if (exists(stale)) {
+    err(`kibitzer: could not remove ${stale}`)
+    err("  It starts a second 'kibitzer channel' that claims advisories and drops them.")
+    err("  Delete it by hand before relying on the channel.")
+    return
+  }
+  out(`kibitzer: removed the superseded plugin channel at ${stale}`)
+  out("  It would have raced this registration for the same queue.")
 }
 
 function readChannelEntry(): { exists: boolean; entry: unknown } | null {
@@ -90,6 +168,21 @@ function runClaudeMcp(args: string[]): boolean {
   return false
 }
 
+/** What to run to undo what we could not. --replace-channel accepts a record we
+ * did not write, and Claude's writer takes a command and arguments -- an HTTP or
+ * SSE server has no such line, so print the record rather than a command that
+ * would name an undefined executable. */
+function recoveryHint(prev: ChannelServer): void {
+  if (typeof prev.command === "string") {
+    const args = Array.isArray(prev.args) ? prev.args.map(String).join(" ") : ""
+    err("  Register it again by hand:")
+    err(`    claude mcp add --scope user ${CHANNEL_NAME} -- ${prev.command} ${args}`.trimEnd())
+    return
+  }
+  err("  It was not a stdio command, so there is no add line to repeat. It was:")
+  err(`    ${JSON.stringify(prev)}`)
+}
+
 function channelUsage(): number {
   err("usage: kibitzer install claude-channel-user [--force] [--replace-channel]")
   return 2
@@ -117,13 +210,36 @@ function cmdInstallClaudeChannel(options: string[]): number {
   }
   // Claude mcp add deliberately rejects duplicate names. Removing first is
   // safe only after the exact ownership gate above (or an explicit override).
-  if (current.exists && !runClaudeMcp(["remove", "--scope", "user", CHANNEL_NAME])) return 1
-  if (!runClaudeMcp(["add", "--scope", "user", CHANNEL_NAME, "--", BIN, "channel"])) return 1
+  const prev = current.exists ? current.entry as ChannelServer : null
+  if (prev && !runClaudeMcp(["remove", "--scope", "user", CHANNEL_NAME])) return 1
+  if (!runClaudeMcp(["add", "--scope", "user", CHANNEL_NAME, "--", BIN, "channel"])) {
+    if (prev && !restoreChannel(prev)) {
+      err(`kibitzer: the previous ${CHANNEL_NAME} registration could not be restored either.`)
+      recoveryHint(prev)
+    } else if (prev) {
+      err(`kibitzer: restored the previous ${CHANNEL_NAME} registration`)
+    }
+    return 1
+  }
   const next = readChannelEntry()
   if (!next || !next.exists || !isOurChannel(next.entry)) {
     err(`kibitzer: Claude did not register the expected ${CHANNEL_NAME} entry in ${channelConfigPath()}`)
+    // A zero exit that registered nothing is the same loss as a failed add, so
+    // treat it the same -- but only when the name is verifiably free. If
+    // something else now holds it, that is a concurrent write, and overwriting
+    // it would be the takeover this command refuses to do unasked.
+    if (prev && next && !next.exists && restoreChannel(prev)) {
+      err(`kibitzer: restored the previous ${CHANNEL_NAME} registration`)
+    } else if (prev) {
+      err("  The previous registration was removed.")
+      recoveryHint(prev)
+    }
     return 1
   }
+  // Only now: until this point the superseded plugin file is still the delivery
+  // path, and removing it before the replacement is confirmed would leave a
+  // failed install with no consumer at all.
+  clearStalePluginChannel()
   out(`kibitzer: Claude channel registered in ${channelConfigPath()} (via Claude Code)`)
   out(`  Restart Claude with: claude --dangerously-load-development-channels server:${CHANNEL_NAME}`)
   return 0

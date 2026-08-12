@@ -1116,6 +1116,27 @@ cfg="${CLAUDE_CONFIG_DIR:?}/.claude.json"
 mkdir -p "$(dirname "$cfg")"
 [ -f "$cfg" ] || printf '{}\n' >"$cfg"
 printf '%s %s\n' "$action" "$name" >>"${KIBITZ_FAKE_CLAUDE_LOG:?}"
+# Fail the FIRST matching action only, so a restore attempt that follows can
+# still succeed. A stand-in that only ever succeeds cannot reach the window
+# between remove and add, which is where the destructive failure lives.
+if [ -n "${KIBITZ_FAKE_CLAUDE_FAIL:-}" ] && [ "$action" = "$KIBITZ_FAKE_CLAUDE_FAIL" ] &&
+   [ ! -e "$KIBITZ_FAKE_CLAUDE_LOG.failed" ]; then
+  : >"$KIBITZ_FAKE_CLAUDE_LOG.failed"
+  exit 1
+fi
+# Succeed loudly, write nothing: a zero exit is not proof the record is there.
+[ "${KIBITZ_FAKE_CLAUDE_NOOP:-}" = "$action" ] && exit 0
+# Succeed, but write someone else's record: the name being occupied is not proof
+# either. First matching action only, as above.
+if [ -n "${KIBITZ_FAKE_CLAUDE_HIJACK:-}" ] && [ "$action" = "$KIBITZ_FAKE_CLAUDE_HIJACK" ] &&
+   [ ! -e "$KIBITZ_FAKE_CLAUDE_LOG.hijacked" ]; then
+  : >"$KIBITZ_FAKE_CLAUDE_LOG.hijacked"
+  tmp="$cfg.fake.$$"
+  jq --arg n "$name" '.mcpServers //= {} | .mcpServers[$n] = {type:"stdio", command:"/bin/true", args:["serve"]}' \
+    "$cfg" >"$tmp"
+  mv "$tmp" "$cfg"
+  exit 0
+fi
 case "$action" in
   add)
     [ "${1:-}" = -- ] && shift
@@ -1185,6 +1206,90 @@ CHRC=$?
 check "channel uninstall leaves a foreign registration untouched" \
   '[ "$CHRC" -ne 0 ] && [ ! -s "$CHROOT/claude.log" ] &&
    [ "$(jq -r '\''.mcpServers["kibitz-channel"].command'\'' "$CHCFG/.claude.json")" = /bin/true ]'
+
+# The refresh is two Claude commands. If the add fails after the remove has
+# already succeeded, the operator must not be left with no channel at all -- a
+# transient CLI failure turning an upgrade into an outage.
+printf '{}\n' >"$CHCFG/.claude.json"; : >"$CHROOT/claude.log"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" >/dev/null 2>&1
+rm -f "$CHROOT/claude.log.failed"; : >"$CHROOT/claude.log"
+eval "$CHENV KIBITZ_FAKE_CLAUDE_FAIL=add \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" \
+  >"$WORK/chan-fail.out" 2>&1
+CHRC=$?
+check "a failed channel add puts back the registration it removed" \
+  '[ "$CHRC" -ne 0 ] &&
+   [ "$(jq -r '\''.mcpServers["kibitz-channel"].command'\'' "$CHCFG/.claude.json")" = "$AGENTSKILL/bin/kibitzer" ]' \
+  "$(cat "$WORK/chan-fail.out")"
+check "and says so rather than reporting a bare failure" \
+  'grep >/dev/null "restored the previous" "$WORK/chan-fail.out"' "$(cat "$WORK/chan-fail.out")"
+
+# An add that exits zero and registers nothing loses the same entry, and a
+# restore that exits zero and writes nothing must not be reported as a restore.
+printf '{}\n' >"$CHCFG/.claude.json"; : >"$CHROOT/claude.log"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" >/dev/null 2>&1
+: >"$CHROOT/claude.log"
+eval "$CHENV KIBITZ_FAKE_CLAUDE_NOOP=add \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" \
+  >"$WORK/chan-noop.out" 2>&1
+CHRC=$?
+check "a silent no-op add is a failure, not a registration" \
+  '[ "$CHRC" -ne 0 ] && ! grep >/dev/null "restored the previous" "$WORK/chan-noop.out"' \
+  "$(cat "$WORK/chan-noop.out")"
+check "and the operator is given the command that puts the entry back" \
+  'grep >/dev/null "claude mcp add --scope user kibitz-channel -- $AGENTSKILL/bin/kibitzer channel" \
+     "$WORK/chan-noop.out"' "$(cat "$WORK/chan-noop.out")"
+
+# The name being occupied afterwards is not the record being back either: a
+# concurrent writer can take it, and "restored" must never be said on that.
+printf '{}\n' >"$CHCFG/.claude.json"; : >"$CHROOT/claude.log"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" >/dev/null 2>&1
+rm -f "$CHROOT/claude.log.hijacked"; : >"$CHROOT/claude.log"
+eval "$CHENV KIBITZ_FAKE_CLAUDE_HIJACK=add \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" \
+  >"$WORK/chan-hijack.out" 2>&1
+CHRC=$?
+check "a name taken by another writer is never reported as restored" \
+  '[ "$CHRC" -ne 0 ] && ! grep >/dev/null "restored the previous" "$WORK/chan-hijack.out"' \
+  "$(cat "$WORK/chan-hijack.out")"
+check "and that other record is left where it is, not overwritten" \
+  '[ "$(jq -r '\''.mcpServers["kibitz-channel"].command'\'' "$CHCFG/.claude.json")" = /bin/true ]'
+
+# Sharing our filename is not evidence of being us. A command that resolves to a
+# different executable is someone else's, and these commands delete entries.
+OTHERBIN="$CHROOT/other-install/bin"
+mkdir -p "$OTHERBIN"; printf '#!/bin/sh\nexit 0\n' >"$OTHERBIN/kibitzer"; chmod +x "$OTHERBIN/kibitzer"
+jq -n --arg b "$OTHERBIN/kibitzer" \
+  '{mcpServers:{"kibitz-channel":{command:$b,args:["channel"]}}}' >"$CHCFG/.claude.json"
+: >"$CHROOT/claude.log"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" uninstall claude-channel-user" >/dev/null 2>&1
+CHRC=$?
+check "channel uninstall leaves another kibitzer installation's record untouched" \
+  '[ "$CHRC" -ne 0 ] && [ ! -s "$CHROOT/claude.log" ] &&
+   [ "$(jq -r '\''.mcpServers["kibitz-channel"].command'\'' "$CHCFG/.claude.json")" = "$OTHERBIN/kibitzer" ]'
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" >/dev/null 2>&1
+CHRC=$?
+check "channel install refuses it too, without --replace-channel" \
+  '[ "$CHRC" -ne 0 ] && [ ! -s "$CHROOT/claude.log" ]'
+
+# An upgrade overwrites files but does not delete one the new version dropped,
+# so a copy installed before the named-server channel keeps its .mcp.json and
+# keeps starting the second consumer.
+printf '{"mcpServers":{"kibitz":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/kibitzer","args":["channel"]}}}\n' \
+  >"$AGENTSKILL/.mcp.json"
+printf '{}\n' >"$CHCFG/.claude.json"; : >"$CHROOT/claude.log"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" >"$WORK/chan-stale.out" 2>&1
+check "channel install removes a superseded plugin .mcp.json left by an upgrade" \
+  '[ ! -e "$AGENTSKILL/.mcp.json" ]' "$(cat "$WORK/chan-stale.out")"
+printf '{"mcpServers":{"kibitz":{"command":"/somewhere/else/bin/kibitzer","args":["channel"]}}}\n' \
+  >"$AGENTSKILL/.mcp.json"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" >"$WORK/chan-foreign.out" 2>&1
+check "the same shape pointing at another executable is left alone" \
+  '[ -e "$AGENTSKILL/.mcp.json" ]' "$(cat "$WORK/chan-foreign.out")"
+printf '{"mcpServers":{"someone-else":{"command":"/bin/true","args":["serve"]}}}\n' \
+  >"$AGENTSKILL/.mcp.json"
+eval "$CHENV \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" >"$WORK/chan-keep.out" 2>&1
+check "an .mcp.json that is not that file is reported, never deleted" \
+  '[ -e "$AGENTSKILL/.mcp.json" ] && grep >/dev/null "leaving it in place" "$WORK/chan-keep.out"' \
+  "$(cat "$WORK/chan-keep.out")"
+rm -f "$AGENTSKILL/.mcp.json"
 
 LOCALSKILL="$CHROOT/project-copy"
 cp -a "$PLUG" "$LOCALSKILL"
