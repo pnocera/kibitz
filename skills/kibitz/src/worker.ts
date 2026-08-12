@@ -7,8 +7,9 @@ import { createHash, randomUUID } from "node:crypto"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import {
-  BIN, PROMPT_TMPL,
-  ageMinutes, append, appendSync, epochOf, initSess, isEnabled, isMuted, isoNow,
+  BIN, Issue, PROMPT_TMPL,
+  ageMinutes, append, appendSync, citedPaths, claimTokens, epochOf, initSess,
+  isEnabled, isMuted, isoNow, outcomeMap, pathsSignature, readIssues, repeatedIssue,
   currentHost, listJson, read, rm, validSid, writeWorkerPid,
 } from "./core.ts"
 import { adapterFor } from "./hosts.ts"
@@ -116,17 +117,44 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
   const advisories = run.advisories
   const seenPath = path.join(d, "seen")
   const seen = new Set((read(seenPath) ?? "").split("\n").filter(Boolean))
+  // Identity is decided here, on the one path both directions publish through:
+  // Codex advising Claude and Claude advising Codex differ only in the runner
+  // upstream of this loop.
+  const issues = readIssues(d)
+  const outcomes = outcomeMap(d)
+  const outcomeOf = (id: string) => outcomes.get(id)?.outcome
   let n = 0
+  let repeats = 0
 
   for (const a of advisories) {
     const note = a?.note ?? ""
     if (!note) continue
     const kind = a?.kind ?? ""
-    if (isMuted(cwd, `${kind} ${note}`)) continue
+    const evidence = a?.evidence ?? ""
+    if (isMuted(cwd, `${kind} ${note} ${evidence}`)) continue
+    // Byte-identical text is suppressed outright, and deliberately does not get
+    // the freshness reprieve the register gives a paraphrase. This is the only
+    // check that works on a note the tokeniser cannot segment -- a note written
+    // entirely in Japanese or Cyrillic yields no tokens at all -- and letting an
+    // unchanged sentence through on an unrelated edit would reopen the
+    // repetition this exists to stop.
     const fp = fingerprint(note)
     if (seen.has(fp)) continue                     // said it already
 
+    const paths = citedPaths(evidence, cwd)
+    const tokens = claimTokens(`${note} ${a?.why_it_matters ?? ""}`)
+    const already = repeatedIssue({ tokens, paths }, issues, cwd, outcomeOf)
+    if (already) {
+      // Not published, but not invisible either: an operator who wonders why the
+      // advisor went quiet about something can see that it did not.
+      append(logPath, `repeat of ${already.id.slice(0, 6)}; not publishing it again\n`)
+      append(path.join(d, "repeats"), `${already.id}\n`)
+      repeats++
+      continue
+    }
+
     const id = randomUUID()
+    const short = id.slice(0, 6)
     const rec = {
       id, epoch: Number(startEpoch), kind, note,
       why_it_matters: a?.why_it_matters ?? "",
@@ -139,17 +167,39 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
     // log cannot be written, do not publish: an unlogged advisory is worse than
     // an undelivered one, and it blocks nothing either way.
     const t = new Date().toTimeString().slice(0, 8)
-    let entry = `\n[${t}] ${kind ? `(${kind})` : ""} ${note}\n`
+    // The short id is in the log because the log is what an operator reads, and
+    // the outbox record that also carries it is deleted on delivery. Without it
+    // here, nothing can name this advisory once it has been read.
+    let entry = `\n[${t}] ${short} ${kind ? `(${kind})` : ""} ${note}\n`
     if (rec.why_it_matters) entry += `   why: ${rec.why_it_matters}\n`
     if (rec.evidence) entry += `   ref: ${rec.evidence}\n`
     if (!appendSync(path.join(d, "advice.log"), entry)) {
       append(logPath, `could not log ${id}; not publishing it\n`)
       continue
     }
-    // Suppress a repeat only once the advisory is actually in the log. Marking
-    // it seen first turns a transient logging failure into permanent omission:
-    // the advisory is never published, never logged, and deduplicated away for
-    // the rest of the session when the log comes back.
+    // The register keeps the whole id and the log shows its first six, the way
+    // a commit is quoted short but stored long: a six-character collision would
+    // otherwise make both advisories permanently unaddressable, with no longer
+    // form anywhere for an operator to fall back on.
+    const issue: Issue = {
+      id, at: isoNow(), kind, fp,
+      tokens: [...tokens], paths, sig: pathsSignature(cwd, paths),
+    }
+    // Before the outbox and before `seen`, for the same reason the log comes
+    // before both: this file is what makes a paraphrase a repeat on the next
+    // cycle and what `mark` resolves an id against. Publishing an advisory that
+    // no register records means an id in the log that resolves to nothing and a
+    // repeat the next worker cannot recognise -- so an unregistered advisory is
+    // not published, exactly as an unlogged one is not.
+    if (!appendSync(path.join(d, "issues.jsonl"), JSON.stringify(issue) + "\n")) {
+      append(logPath, `could not register ${short}; not publishing it\n`)
+      continue
+    }
+    issues.push(issue)
+    // Suppress a repeat only once the advisory is actually recorded. Marking it
+    // seen first turns a transient failure into permanent omission: the advisory
+    // is never published, never registered, and deduplicated away for the rest
+    // of the session once the disk recovers.
     seen.add(fp)
     append(seenPath, fp + "\n")
     append(path.join(d, "kinds"), (kind || "unlabelled") + "\n")
@@ -161,7 +211,7 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
     } catch { rm(tmp); continue }
     n++
   }
-  append(logPath, `published ${n} of ${advisories.length}\n`)
+  append(logPath, `published ${n} of ${advisories.length}${repeats ? `, ${repeats} repeat(s) held back` : ""}\n`)
   rm(outFile)
   // Consumed successfully: drop the claim.
   for (const f of listJson(path.join(d, "events-processing"))) rm(f)

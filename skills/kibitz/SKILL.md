@@ -41,10 +41,11 @@ command once if a plain shell command is preferred.
 | "show me the advisor live" | Claude: `kibitzer pane`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer pane --host codex` (needs a Herdr terminal) |
 | "what should I do next / ask it now" | Claude: `kibitzer advise-now`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer advise-now --host codex` |
 | "stop telling me about X" | Claude: `kibitzer mute "X"`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer mute "X" --host codex` (`mute list`, `mute clear`) |
-| "is it saying anything useful" | Claude: `kibitzer stats`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer stats --host codex` — counts by the kind the advisor chose |
+| "is it saying anything useful" | Claude: `kibitzer stats`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer stats --host codex` — volume, distinct issues, and outcomes, kept apart |
+| "that one was useful / I disagree with it" | Claude: `kibitzer mark <id> accepted\|investigated\|declined\|superseded <id>`; Codex: same with `--host codex`. The id is the short code at the head of each log entry. A **declined** issue stays quiet even after its evidence changes |
 
 Default is **off**. Controls without `--host` act on both installed hosts. Session-specific
-commands such as `log`, `stats`, and `advise-now` default to Claude; use `--host codex` for the
+commands such as `log`, `stats`, `mark`, and `advise-now` default to Claude; use `--host codex` for the
 Codex session. Opt-in is per project directory.
 
 New project: use the matching `on` command above. A plugin install needs no per-project hook

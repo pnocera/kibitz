@@ -410,7 +410,177 @@ export const epochOf = (cwd: string) => readState(cwd).epoch
 export const isEnabled = (cwd: string) => readState(cwd).enabled
 export const isQuiet = (cwd: string) => exists(path.join(projDir(cwd), "quiet"))
 
-/** Substring, case-insensitive, against "<kind> <note>". */
+// --- issue identity ---------------------------------------------------------
+//
+// Two advisories are the same issue when they make the same claim about the
+// same code, however the sentence is arranged. Hashing the note alone made
+// identity literal: a rephrased restatement was a new advisory, and one concern
+// arrived twenty-five times in a single session under fourteen different kinds.
+// So identity is the distinctive words of the claim plus the files it cites,
+// and an advisory is a repeat only while those files still say what they said.
+
+const STOP = new Set(`about after all already also and any are around because
+been before being both but can cannot come could current currently does doing
+done down each either else even every for from had has have here how however
+into its itself just like made make many may might more most much must need
+needs never new now off once one only onto other over own past per rather
+same see should since some still such take than that the their them then there
+these they thing things this those through thus too under until upon use used
+using very was way well were what when where whether which while who why will
+with within without would you your
+advisory advisories kibitz kibitzer note ref why matters currently instead`
+  .split(/\s+/).filter(Boolean))
+
+/** The distinctive words of a claim: identifiers, paths and content words.
+ *  Bare numbers are dropped -- a line number moves with every edit above it and
+ *  was never part of what the advisory was saying. */
+export function claimTokens(text: string): Set<string> {
+  const out = new Set<string>()
+  for (const raw of String(text).toLowerCase().split(/[^a-z0-9_./-]+/)) {
+    const t = raw.replace(/^[-.]+/, "").replace(/[-.]+$/, "")
+    if (t.length < 3 || STOP.has(t) || /^[\d.-]+$/.test(t)) continue
+    out.add(t)
+  }
+  return out
+}
+
+/** |a ∩ b| / min(|a|,|b|). Containment rather than Jaccard: a restatement that
+ *  bolts on a paragraph of fresh prose is still the same claim, and Jaccard
+ *  would score it as new for being longer. */
+export function containment(a: Set<string>, b: Set<string>): number {
+  const [small, big] = a.size <= b.size ? [a, b] : [b, a]
+  // An empty set matches nothing. Load-bearing: a note in a script the tokeniser
+  // cannot segment yields no tokens, and scoring that as a perfect match would
+  // collapse every such advisory into the first one.
+  if (small.size === 0) return 0
+  let hits = 0
+  for (const t of small) if (big.has(t)) hits++
+  return hits / small.size
+}
+
+/** The files an advisory cites, from its evidence field. Line and range
+ *  suffixes are stripped: they drift with every edit above them, while the file
+ *  is what the claim is actually about. Only paths that exist are kept, which
+ *  also drops a citation that was imagined. */
+export function citedPaths(evidence: string, cwd: string): string[] {
+  // Resolved once, and everything is decided against it. This text is written by
+  // a model: `x/../../../../../etc/passwd` never starts with `..` and so clears
+  // a naive prefix check, while naming a file that pathsSignature would go on to
+  // read. A citation must not become ambient filesystem access.
+  let root: string
+  try { root = fs.realpathSync(cwd) } catch { return [] }
+  const found = new Set<string>()
+  for (const word of String(evidence).split(/[\s,;()[\]]+/)) {
+    const t = word.replace(/[.,;:]+$/, "").replace(/:[\d,\s-]*$/, "")
+    // A slash or a dot, or a capital: Makefile, Dockerfile and LICENSE are cited
+    // as often as any .ts file, and requiring an extension drops them into the
+    // evidence-free rule where they are much harder to match. Lowercase prose
+    // still cannot qualify, so a sentence cannot accidentally name a file.
+    if (!t || t.startsWith("-") || !(/[/.]/.test(t) || /[A-Z]/.test(t))) continue
+    try {
+      // realpath, not resolve: a symlink inside the workspace pointing out of it
+      // would otherwise pass a textual containment check and be read anyway.
+      const abs = fs.realpathSync(path.resolve(root, t))
+      if (abs !== root && !abs.startsWith(root + path.sep)) continue
+      if (!fs.statSync(abs).isFile()) continue
+      found.add(path.relative(root, abs))
+    } catch {}
+  }
+  return [...found].sort()
+}
+
+/** What the cited files hold now. An advisory about code that has since changed
+ *  is not a repeat -- that is new evidence, and it gets through. */
+export function pathsSignature(cwd: string, paths: string[]): string {
+  const h = createHash("sha1")
+  for (const rel of paths)
+    h.update(rel).update("\0").update(read(path.join(cwd, rel)) ?? "").update("\0")
+  return h.digest("hex")
+}
+
+/** How alike two claims must be to count as one. Env-tunable because the right
+ *  number is a judgement about an advisor's writing, not a fact about code. */
+export const REPEAT_SIMILARITY = (() => {
+  const n = Number(process.env.ADVISOR_REPEAT_SIMILARITY)
+  return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.6
+})()
+
+export interface Issue {
+  id: string; at: string; kind: string; fp: string
+  tokens: string[]; paths: string[]; sig: string
+}
+
+export interface Candidate { tokens: Set<string>; paths: string[] }
+
+/** Append-only, one JSON object per line, unreadable lines skipped. Both files
+ *  outlive the outbox record, which is deleted on delivery -- an advisory has to
+ *  stay addressable after it has been read, or no outcome can name it. */
+function readJsonl<T>(p: string): T[] {
+  const out: T[] = []
+  for (const line of (read(p) ?? "").split("\n")) {
+    if (line.trim() === "") continue
+    try { out.push(JSON.parse(line) as T) } catch {}
+  }
+  return out
+}
+
+export const readIssues = (sessionDir: string): Issue[] =>
+  readJsonl<Issue>(path.join(sessionDir, "issues.jsonl"))
+
+export interface OutcomeEvent { id: string; outcome: string; by?: string; at: string }
+
+export const readOutcomes = (sessionDir: string): OutcomeEvent[] =>
+  readJsonl<OutcomeEvent>(path.join(sessionDir, "outcomes.jsonl"))
+
+/** Latest event per issue wins: the file is a history, and an operator is
+ *  allowed to change their mind without the record being rewritten. */
+export function outcomeMap(sessionDir: string): Map<string, OutcomeEvent> {
+  const m = new Map<string, OutcomeEvent>()
+  for (const e of readOutcomes(sessionDir)) if (e?.id) m.set(e.id, e)
+  return m
+}
+
+/** The issue a candidate repeats, or null if it is saying something new.
+ *
+ *  Shared by both directions -- Codex advising Claude and Claude advising Codex
+ *  publish through the same loop, so this is the only place the question is
+ *  asked. Three rules, and the middle one is the whole point: citing the same
+ *  file is not enough (one file holds many separate problems) and similar
+ *  wording is not enough (two files can be described alike), so a repeat has to
+ *  be both, over code that has not moved. */
+export function repeatedIssue(
+  cand: Candidate, issues: Issue[], cwd: string,
+  outcomeOf: (id: string) => string | undefined = () => undefined,
+): Issue | null {
+  for (const issue of issues) {
+    // No shortcut for identical wording: the freshness rule below governs every
+    // case, or the documented policy is not the policy. Byte-identical repeats
+    // never reach here anyway -- `seen` catches those before this is asked.
+    const sim = containment(cand.tokens, new Set(issue.tokens))
+    const shared = issue.paths.filter(p => cand.paths.includes(p))
+    if (shared.length === 0) {
+      // Nothing to check the claim against. Only near-identical prose counts,
+      // because a wrong guess here suppresses an advisory about other code.
+      if (cand.paths.length === 0 && issue.paths.length === 0 && sim >= 0.8) return issue
+      continue
+    }
+    // Containment divides by the smaller set, so a terse advisory whose handful
+    // of words happen to appear inside a long one scores 1.0 against it. Below
+    // this many distinctive words there is not enough of a claim to be sure it
+    // is the same claim, and a false suppression is silent.
+    if (Math.min(cand.tokens.size, issue.tokens.length) < 8) continue
+    if (sim < REPEAT_SIMILARITY) continue
+    // Declined once is declined: re-raising it on the next unrelated edit to the
+    // same file is the re-litigation this exists to stop. Anything else gets
+    // through the moment its evidence changes.
+    if (outcomeOf(issue.id) === "declined") return issue
+    if (issue.sig === pathsSignature(cwd, issue.paths)) return issue
+  }
+  return null
+}
+
+/** Substring, case-insensitive, against "<kind> <note> <evidence>". Evidence is
+ *  included so `kibitzer mute src/install.ts` mutes a file, not just a phrase. */
 export function isMuted(cwd: string, text: string): boolean {
   const m = read(path.join(projDir(cwd), "mutes"))
   if (!m) return false

@@ -97,7 +97,8 @@ kibitzer pane [cwd]                      Herdr side pane following the log
 kibitzer statusline [cwd]                pending-count segment for your status line
 kibitzer advise-now [cwd]                ask for a contribution now, without waiting
 kibitzer mute <text>|list|clear          stop hearing about a topic
-kibitzer stats [cwd]                     what kinds of things it has been saying
+kibitzer stats [cwd]                     what it has said, and what came of it
+kibitzer mark <id> <outcome> [<id>]      record what an advisory led to
 kibitzer lint <file>                     fail if a file reads like a review gate
 kibitzer install codex-user              register user-scoped Codex hooks
 ```
@@ -133,6 +134,27 @@ It does say explicitly that the range is wider than fault-finding: a simpler app
 assumption, something worth preserving. Each advisory carries a free-text `kind` in Codex's own
 words, and `kibitzer stats` counts them, so whether the constructive half actually materialises is
 measured rather than assumed.
+
+**Saying it once.** An advisor restates. In the session that motivated this, one concern arrived
+twenty-five times under fourteen different `kind` labels, because identity was a hash of the
+sentence and every rewording was therefore new. Identity is now the distinctive words of the claim
+plus the files its `evidence` cites, and a restatement is a repeat only while those files still say
+what they said. Change the code and the concern is raised again — that is new evidence, not noise.
+Held-back repeats are counted, not hidden; `kibitzer stats` reports them.
+
+Two things this cannot infer. It cannot tell a genuinely new claim from a reworded one when the
+advisor cites nothing, so an advisory with no `evidence` is only ever suppressed on near-identical
+prose. And it cannot know you considered something and disagreed. That is what `mark` is for:
+
+```bash
+kibitzer mark 4f2a1c declined
+```
+
+The id is the short code at the head of each `advice.log` entry. `accepted`, `investigated`,
+`declined`, and `superseded <id>` are the four outcomes; nothing is ever recorded unless you say so,
+and everything else counts as unmarked. A **declined** issue stays quiet even when its evidence
+changes, which is the one thing no signature check can decide for you. `stats` then separates
+volume from distinct issues from outcomes, because the first answers nothing you wanted to know.
 
 **What it costs you.** At most 3 advisories per tool call. Hooks do file I/O only and run in tens of
 milliseconds against Claude Code's 2s budget; the Codex call is fully detached and never blocks a

@@ -8,7 +8,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import {
   BIN, HOME, OURS_RE, PROMPT_TMPL, SCHEMA,
-  currentHost, currentSession, deliveredCount, ensureHostRoot, epochOf, exists, isEnabled, listJson, mkdirp, projDir, read,
+  appendSync, currentHost, currentSession, deliveredCount, ensureHostRoot, epochOf, exists, isEnabled, isoNow, listJson, mkdirp, outcomeMap, projDir, read, readIssues,
   killTree, readState, rm, sessDir, verifiedWorkerPid, which, writeState,
 } from "./core.ts"
 import { adapterFor } from "./hosts.ts"
@@ -211,14 +211,80 @@ export function cmdMute(arg?: string, cwd = process.cwd()): number {
   return 0
 }
 
+const OUTCOMES = ["accepted", "investigated", "declined", "superseded"]
+
+/** Record what an advisory led to. The advisor cannot observe this and must not
+ *  guess it: an outcome is written only when someone says so, and everything
+ *  unmarked is reported as unmarked rather than counted as anything. */
+export function cmdMark(idPrefix?: string, outcome?: string, a?: string, b?: string): number {
+  if (!idPrefix || !outcome || !OUTCOMES.includes(outcome)) {
+    err(`usage: kibitzer mark <id> accepted|investigated|declined [cwd]`)
+    err(`       kibitzer mark <id> superseded <id it duplicates> [cwd]`)
+    return 2
+  }
+  // Only `superseded` names another advisory, so only there is the third word an
+  // id. Consuming it unconditionally made the ordinary `mark <id> accepted /repo`
+  // read the directory as an id and fail.
+  const by = outcome === "superseded" ? a : undefined
+  const cwd = (outcome === "superseded" ? b : a) || process.cwd()
+  if (outcome === "superseded" && !by) {
+    err("usage: kibitzer mark <id> superseded <id it duplicates> [cwd]"); return 2
+  }
+  const sid = currentSession(cwd)
+  if (!sid) { err("kibitzer: no session yet"); return 1 }
+  const d = sessDir(cwd, sid)
+  const hits = readIssues(d).filter(i => i.id.startsWith(idPrefix))
+  // Nothing is written for an id we cannot resolve. A mark landing on the wrong
+  // advisory is worse than one that did not land: the record is the evidence.
+  if (hits.length === 0) { err(`kibitzer: no advisory here starts with '${idPrefix}'`); return 1 }
+  if (hits.length > 1) {
+    // Full ids, not a longer prefix: the log shows six characters and nothing
+    // else exposes more, so telling an operator to "type more" of something they
+    // cannot see is a dead end. These are the values to paste.
+    err(`kibitzer: '${idPrefix}' matches ${hits.length} advisories. Use one of:`)
+    for (const h of hits) err(`    ${h.id}`)
+    return 1
+  }
+  let byId: string | undefined
+  if (by !== undefined && by !== "") {
+    const target = readIssues(d).filter(i => i.id.startsWith(by))
+    if (target.length !== 1) { err(`kibitzer: '${by}' does not name exactly one advisory`); return 1 }
+    byId = target[0]!.id
+  }
+  const ev = { id: hits[0]!.id, outcome, ...(byId ? { by: byId } : {}), at: isoNow() }
+  // Written where the register is, so a mark survives the outbox record it names.
+  if (!appendSync(path.join(d, "outcomes.jsonl"), JSON.stringify(ev) + "\n")) {
+    err("kibitzer: could not record that"); return 1
+  }
+  out(`kibitzer: ${hits[0]!.id.slice(0, 6)} marked ${outcome}${byId ? ` (duplicate of ${byId.slice(0, 6)})` : ""}`)
+  return 0
+}
+
 /** The measurement the design asks for: is this offering anything beyond
- *  fault-finding? Counts by the kind Codex chose for itself. */
+ *  fault-finding, and did any of it change a decision? Volume answers neither,
+ *  so it is reported as what it is -- attempts to say something -- next to the
+ *  count of distinct issues and what became of them. */
 export function cmdStats(cwd = process.cwd()): number {
   const sid = currentSession(cwd)
   if (!sid) { err("kibitzer: no session yet"); return 1 }
-  const kinds = (read(path.join(sessDir(cwd, sid), "kinds")) ?? "").split("\n").filter(Boolean)
+  const d = sessDir(cwd, sid)
+  const kinds = (read(path.join(d, "kinds")) ?? "").split("\n").filter(Boolean)
   if (kinds.length === 0) { out("kibitzer: nothing said yet"); return 0 }
-  out(`advisories this session: ${kinds.length}\n`)
+  const issues = readIssues(d)
+  const held = (read(path.join(d, "repeats")) ?? "").split("\n").filter(Boolean).length
+  const marks = outcomeMap(d)
+
+  out(`advisories published : ${kinds.length}`)
+  if (issues.length > 0) out(`distinct issues      : ${issues.length}`)
+  if (held > 0) out(`repeats held back    : ${held}`)
+  const counted = new Map<string, number>()
+  for (const [, e] of marks) counted.set(e.outcome, (counted.get(e.outcome) ?? 0) + 1)
+  if (issues.length > 0) {
+    const parts = OUTCOMES.filter(o => counted.get(o)).map(o => `${counted.get(o)} ${o}`)
+    parts.push(`${issues.length - marks.size} unmarked`)
+    out(`outcomes             : ${parts.join(", ")}`)
+  }
+  out("")
   const counts = new Map<string, number>()
   for (const k of kinds) counts.set(k, (counts.get(k) ?? 0) + 1)
   for (const [k, n] of [...counts].sort((a, b) => b[1] - a[1]))
@@ -319,7 +385,11 @@ export const USAGE = `kibitz — cross-host background advisory
   kibitzer status [cwd] [--host H] what is enabled, pending, running
   kibitzer advise-now [cwd]    ask for a contribution now, without waiting
   kibitzer mute <text>|list|clear   stop hearing about a topic
-  kibitzer stats [cwd]         what kinds of things it has been saying
+  kibitzer stats [cwd]         what it has said, and what came of it
+  kibitzer mark <id> <outcome> record what an advisory led to; the id is the
+                               short code in the log. accepted, investigated,
+                               declined, or superseded <id it duplicates>.
+                               A declined issue stays quiet.
   kibitzer log [cwd] [n]       what has been said so far
   kibitzer tail [cwd]          follow the advisory log
   kibitzer pane [cwd]          open a Herdr side pane following the log

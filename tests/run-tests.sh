@@ -246,7 +246,7 @@ date +%s >"$(sdir)/last-cycle"
 
 # The worker must consume the tap and clear it.
 find "$(sdir)/events" "$(sdir)/events-processing" -name '*.json' -delete 2>/dev/null
-rm -f "$(sdir)/seen"
+rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl"
 # Keep last-cycle fresh: clearing it would let this tap call spawn its own
 # cycle, which would consume the event before the worker under test sees it.
 date +%s >"$(sdir)/last-cycle"
@@ -351,7 +351,7 @@ kill "$BYSTANDER" 2>/dev/null; wait "$BYSTANDER" 2>/dev/null
 # still holds the control lock for its publication. `off` may wait to clean up;
 # nothing may reach Claude in the meantime.
 "$ADV" on "$WORK" >/dev/null
-rm -f "$(sdir)/seen"
+rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl"
 SLOWBIN="$WORK/slowbin"; mkdir -p "$SLOWBIN"
 cat >"$SLOWBIN/codex" <<'FAKE'
 #!/usr/bin/env bash
@@ -440,7 +440,7 @@ FAKE
 chmod +x "$RACEBIN/codex"
 
 "$ADV" on "$WORK" >/dev/null
-rm -f "$(sdir)/seen"
+rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl"
 PATH="$RACEBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1 &
 WPID=$!
 sleep 0.4
@@ -575,7 +575,7 @@ echo
 echo "deduplication"
 
 "$ADV" on "$WORK" >/dev/null
-rm -f "$(sdir)/seen"
+rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl"
 UNIBIN="$WORK/unibin"; mkdir -p "$UNIBIN"
 cat >"$UNIBIN/codex" <<'FAKE'
 #!/usr/bin/env bash
@@ -614,7 +614,7 @@ check "tap recorded an event before off" '[ "$(evcount)" -eq 1 ]'
 check "off clears the event queue, not just the outbox" '[ "$(evcount)" -eq 0 ]' \
   "pre-off activity would feed the next cycle after re-enabling"
 "$ADV" on "$WORK" >/dev/null
-rm -f "$(sdir)/seen"; date +%s >"$(sdir)/last-cycle"
+rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl"; date +%s >"$(sdir)/last-cycle"
 : >"$PROMPTCAP"
 wait_idle
 PATH="$CAPBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
@@ -634,7 +634,7 @@ sleep 0.2
 "$ADV" off "$WORK" >/dev/null
 wait "$TPID" 2>/dev/null
 "$ADV" on "$WORK" >/dev/null
-rm -f "$(sdir)/seen"; date +%s >"$(sdir)/last-cycle"
+rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl"; date +%s >"$(sdir)/last-cycle"
 : >"$PROMPTCAP"
 wait_idle
 PATH="$CAPBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
@@ -643,6 +643,14 @@ check "an event written by an in-flight tap hook after off is never used" \
 
 echo
 echo "the channel (optional transport)"
+
+# The channel drains on a timer, so these pipelines only have to hold stdin open
+# for several ticks. The two numbers are tuned together: at the 50ms floor the
+# server accepts, 0.6s is a dozen ticks -- the same margin the old 200ms/2s pair
+# gave, in under a third of the wall clock. This section was half the suite's
+# 52-second runtime, and all of it was waiting.
+CHAN_POLL=50
+CHAN_HOLD=0.6
 
 # No `head` in the pipeline: it SIGPIPEs the server and pipefail then reports
 # failure even when the assertion holds.
@@ -674,8 +682,8 @@ check "ships no auto-start MCP server that would become a second channel consume
 "$ADV" on "$WORK" >/dev/null
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-1 "advice for the channel"
-( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 3 ) \
-  | ( cd "$WORK" && HOME="$NOREG" KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep $CHAN_HOLD ) \
+  | ( cd "$WORK" && HOME="$NOREG" KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=$CHAN_POLL timeout 5 "$ADV" channel ) \
   >"$WORK/chan.out" 2>/dev/null
 check "the channel emits a channel notification for a pending advisory" \
   'grep >/dev/null "notifications/claude/channel" "$WORK/chan.out"' "$(cat "$WORK/chan.out")"
@@ -698,8 +706,8 @@ check "so the hook drain will not deliver it a second time" \
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-amb "must not cross sessions"
 EMPTYHOME="$WORK/nohome"; mkdir -p "$EMPTYHOME"
-( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
-  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep $CHAN_HOLD ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=$CHAN_POLL timeout 5 "$ADV" channel ) \
   >"$WORK/chanamb.out" 2>"$WORK/chanamb.err"
 check "an unbindable channel refuses to push" \
   '! grep >/dev/null "must not cross sessions" "$WORK/chanamb.out"' "$(cat "$WORK/chanamb.out")"
@@ -708,8 +716,8 @@ check "and says why, once" \
   "$(cat "$WORK/chanamb.err")"
 check "the advisory stays queued for the hook drain instead" \
   '[ -n "$(find "$(sdir)/outbox" -name "*.json" 2>/dev/null)" ]'
-( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
-  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=200 \
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep $CHAN_HOLD ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=$CHAN_POLL \
       timeout 5 "$ADV" channel ) >"$WORK/chanbound.out" 2>/dev/null
 check "KIBITZ_SESSION binds it explicitly and delivery resumes" \
   'grep >/dev/null "must not cross sessions" "$WORK/chanbound.out"' "$(cat "$WORK/chanbound.out")"
@@ -720,8 +728,8 @@ jq -n --arg s "$SID" --argjson p "$$" --arg st "$PROCSTART" \
   '{sessionId:$s, pid:$p, procStart:$st}' >"$EMPTYHOME/.claude/sessions/$$.json"
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-reg "bound through the registry"
-( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
-  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep $CHAN_HOLD ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=$CHAN_POLL timeout 5 "$ADV" channel ) \
   >"$WORK/chanreg.out" 2>/dev/null
 check "Claude's session registry binds the channel without configuration" \
   'grep >/dev/null "bound through the registry" "$WORK/chanreg.out"' "$(cat "$WORK/chanreg.out")"
@@ -729,9 +737,9 @@ check "Claude's session registry binds the channel without configuration" \
 # The override becomes a path segment, so traversal must be refused outright.
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-trav "must not escape the session subtree"
-( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep $CHAN_HOLD ) \
   | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_SESSION="../../elsewhere" \
-      KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+      KIBITZ_CHANNEL_POLL_MS=$CHAN_POLL timeout 5 "$ADV" channel ) \
   >"$WORK/chantrav.out" 2>"$WORK/chantrav.err"
 check "a traversal in KIBITZ_SESSION is refused" \
   'grep >/dev/null "not a valid session id" "$WORK/chantrav.err"' "$(cat "$WORK/chantrav.err")"
@@ -749,8 +757,8 @@ jq -n --argjson p "$$" --arg st "$PROCSTART" \
   '{sessionId:"../../elsewhere", pid:$p, procStart:$st}' >"$EMPTYHOME/.claude/sessions/$$.json"
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-badreg "must not bind through a traversing record"
-( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
-  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep $CHAN_HOLD ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=$CHAN_POLL timeout 5 "$ADV" channel ) \
   >"$WORK/chanbadreg.out" 2>/dev/null
 check "a traversing sessionId in the registry is refused too" \
   '! grep >/dev/null "must not bind through a traversing record" "$WORK/chanbadreg.out"' \
@@ -762,9 +770,9 @@ jq -n --arg s "$SID" --argjson p "$$" --arg st "$PROCSTART" \
 # value naming another session would drain that session's queue into this one.
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-conflict "belongs to the bound session"
-( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep $CHAN_HOLD ) \
   | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_SESSION="a-different-session" \
-      KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+      KIBITZ_CHANNEL_POLL_MS=$CHAN_POLL timeout 5 "$ADV" channel ) \
   >"$WORK/chanconf.out" 2>"$WORK/chanconf.err"
 check "an override that contradicts the registry is ignored" \
   'grep >/dev/null "ignoring the override" "$WORK/chanconf.err"' "$(cat "$WORK/chanconf.err")"
@@ -777,8 +785,8 @@ jq -n --arg s "$SID" --argjson p "$$" --arg st "999999999" \
   '{sessionId:$s, pid:$p, procStart:$st}' >"$EMPTYHOME/.claude/sessions/$$.json"
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-stale "must not bind through a stale record"
-( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
-  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) \
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep $CHAN_HOLD ) \
+  | ( cd "$WORK" && HOME="$EMPTYHOME" KIBITZ_CHANNEL_POLL_MS=$CHAN_POLL timeout 5 "$ADV" channel ) \
   >"$WORK/chanstale.out" 2>/dev/null
 check "a stale registry record does not bind the channel" \
   '! grep >/dev/null "must not bind through a stale record" "$WORK/chanstale.out"' \
@@ -790,19 +798,23 @@ jq -n --arg s "$SID" --argjson p "$$" --arg st "$PROCSTART" \
   '{sessionId:$s, pid:$p, procStart:$st}' >"$RELOC/sessions/$$.json"
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-reloc "bound through a relocated config"
-( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep 2 ) \
+( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'; sleep $CHAN_HOLD ) \
   | ( cd "$WORK" && HOME="$EMPTYHOME" CLAUDE_CONFIG_DIR="$RELOC" \
-      KIBITZ_CHANNEL_POLL_MS=200 timeout 5 "$ADV" channel ) >"$WORK/chanreloc.out" 2>/dev/null
+      KIBITZ_CHANNEL_POLL_MS=$CHAN_POLL timeout 5 "$ADV" channel ) >"$WORK/chanreloc.out" 2>/dev/null
 check "CLAUDE_CONFIG_DIR relocates the registry the channel reads" \
   'grep >/dev/null "bound through a relocated config" "$WORK/chanreloc.out"' \
   "$(cat "$WORK/chanreloc.out")"
 
 # `off` landing mid-drain must stop the channel too, not only the hook.
+# The only test here that wants a SLOW poll: it has to land `off` inside the
+# window between queueing an advisory and the tick that would drain it, so the
+# tick interval is the window and it must outlast an `off` process starting up.
+# Speeding this one up is what makes it stop testing anything.
 "$ADV" on "$WORK" >/dev/null
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 plant chan-off "must not be pushed after off"
 ( printf '%s\n%s\n' "$INIT" '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-  sleep 0.4; ( cd "$WORK" && "$ADV" off "$WORK" >/dev/null ); sleep 2 ) \
+  sleep 0.4; ( cd "$WORK" && "$ADV" off "$WORK" >/dev/null ); sleep 1.2 ) \
   | ( cd "$WORK" && HOME="$NOREG" KIBITZ_SESSION="$SID" KIBITZ_CHANNEL_POLL_MS=1000 timeout 6 "$ADV" channel ) \
   >"$WORK/chanoff.out" 2>/dev/null
 check "off stops the channel pushing, as it stops the hook drain" \
@@ -1396,7 +1408,7 @@ JSON
 exit 0
 FAKE
 chmod +x "$KINDBIN/codex"
-"$ADV" on "$WORK" >/dev/null; rm -f "$(sdir)/seen" "$(sdir)/kinds"
+"$ADV" on "$WORK" >/dev/null; rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl" "$(sdir)/kinds"
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 wait_idle
 PATH="$KINDBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
@@ -1412,7 +1424,7 @@ check "stats reports what kinds were offered" \
 
 # mute
 "$ADV" mute "simpler approach" "$WORK" >/dev/null
-rm -f "$(sdir)/seen"; find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl"; find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 wait_idle
 PATH="$KINDBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "mute suppresses a matching advisory" \
@@ -1476,7 +1488,7 @@ check "worker wrote to the durable operator log" \
 # The operator log is a delivery-independent record of truth: advisories reach it
 # even when Claude is never given them.
 "$ADV" quiet on "$WORK" >/dev/null
-: >"$CAPTURE"; rm -f "$(sdir)/seen"
+: >"$CAPTURE"; rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl"
 wait_idle
 PATH="$FAKEBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "operator log records advisories even while injection is quiet" \
@@ -1489,7 +1501,7 @@ check "operator log records advisories even while injection is quiet" \
 find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
 mv "$(sdir)/advice.log" "$WORK/advice.log.bak"
 mkdir "$(sdir)/advice.log"        # unwritable as a file: appends now fail
-: >"$CAPTURE"; rm -f "$(sdir)/seen"
+: >"$CAPTURE"; rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl"
 wait_idle
 PATH="$FAKEBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
 check "an advisory that cannot be logged is not published" \
@@ -1513,6 +1525,193 @@ check "the recovered advisory reaches Claude, not just the log" \
   'printf "%s" "$(fire PreToolUse)" | jq -r ".hookSpecificOutput.additionalContext" |
      grep >/dev/null "captured"' \
   "logged after recovery but never published"
+
+echo
+echo "issue identity — the same claim about the same code, however worded"
+
+# The old dedup hashed the whole note, so a rephrased restatement was a new
+# advisory. One concern arrived 25 times in a single session under 14 kinds.
+IDBIN="$WORK/idbin"; mkdir -p "$IDBIN"
+SUBJ="$WORK/subject.ts"
+printf 'export const a = 1\n' >"$SUBJ"
+idfake() {   # $1 = note, $2 = why, $3 = evidence
+  cat >"$IDBIN/codex" <<FAKE
+#!/usr/bin/env bash
+out=""; prev=""
+for a in "\$@"; do [ "\$prev" = "-o" ] && out="\$a"; prev="\$a"; done
+[ -n "\$out" ] && cat >"\$out" <<'JSON'
+{"advisories":[{"kind":"k","note":"$1","why_it_matters":"$2","evidence":"$3","confidence":0.9}]}
+JSON
+exit 0
+FAKE
+  chmod +x "$IDBIN/codex"
+}
+idrun() { wait_idle; PATH="$IDBIN:$PATH" "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1; }
+published() { find "$(sdir)/outbox" -name '*.json' 2>/dev/null | wc -l; }
+
+"$ADV" on "$WORK" >/dev/null
+rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl" "$(sdir)/repeats" "$(sdir)/kinds"
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+# The two claims below are real restatements from the session that motivated
+# this, lightly de-punctuated. Synthetic paraphrases are a poor test: an advisor
+# reuses far more of its own vocabulary than a person inventing a reworded
+# example does, and tuning the threshold against invented text would set it for
+# a phenomenon that does not occur.
+N1="Replacing an existing channel removes it before adding the new one. If claude mcp add fails, an owned registration has already been deleted, contrary to the otherwise preservation-oriented contract."
+W1="A transient CLI failure converts a failed install into lost user configuration."
+N2="The replacement path deletes the existing registration before adding the new one. If claude mcp add fails, an owned registration is lost; add a failure-path test and decide on a rollback strategy before calling this preservation-oriented UX complete."
+W2="A transient CLI or config failure currently converts a failed install into destructive state change."
+N3="The fallback in isOurChannel is broader than its comment: even when the resolved command differs from this executable, the unconditional suffix test accepts any path ending in bin/kibitzer."
+W3="This defeats the stated preservation guarantee for a plausible name collision."
+
+idfake "$N1" "$W1" "subject.ts:10-20"
+idrun
+check "a new claim is published and registered" \
+  '[ "$(published)" -eq 1 ] && [ "$(wc -l <"$(sdir)/issues.jsonl")" -eq 1 ]'
+
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+idfake "$N2" "$W2" "subject.ts:14-22"
+idrun
+check "the same claim reworded, over unchanged code, is held back" \
+  '[ "$(published)" -eq 0 ] && [ -s "$(sdir)/repeats" ]' "published $(published)"
+
+# Different problem, same file: citing one file is not enough to be a repeat,
+# because a file holds many separate problems.
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+idfake "$N3" "$W3" "subject.ts:40"
+idrun
+check "a different claim about the same file still gets through" \
+  '[ "$(published)" -eq 1 ]' "published $(published)"
+
+# Changed evidence is new evidence. The wording differs again from N2, because
+# byte-identical text is held by the literal cache regardless -- that exception
+# is deliberate and is what keeps a note the tokeniser cannot segment from
+# collapsing into the first one.
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+printf 'export const a = 2  // edited\n' >"$SUBJ"
+idfake "The replacement path removes the existing registration before adding the new one. If claude mcp add fails, an owned registration is lost with no rollback; add a failure-path test before calling this preservation-oriented UX complete." \
+       "$W2" "subject.ts:14-22"
+idrun
+check "once the cited file changes, the claim is allowed again" \
+  '[ "$(published)" -eq 1 ]' "published $(published)"
+
+# Marking. The advisor cannot observe an outcome, so nothing is recorded until
+# somebody says so -- and an id that does not resolve writes nothing at all.
+FIRST="$(head -1 "$(sdir)/issues.jsonl" | jq -r .id | cut -c1-6)"
+OUTBEFORE="$(cat "$(sdir)/outcomes.jsonl" 2>/dev/null | wc -l)"
+"$ADV" mark zzzzzz declined "$WORK" >/dev/null 2>&1; MRC=$?
+check "an id that names nothing fails and records nothing" \
+  '[ "$MRC" -ne 0 ] && [ "$(cat "$(sdir)/outcomes.jsonl" 2>/dev/null | wc -l)" -eq "$OUTBEFORE" ]'
+"$ADV" mark "$FIRST" nonsense "$WORK" >/dev/null 2>&1; MRC=$?
+check "an outcome that is not one of the four is refused" '[ "$MRC" -ne 0 ]'
+"$ADV" mark "" accepted "$WORK" >/dev/null 2>&1; MRC=$?
+check "an empty id is refused rather than matching everything" '[ "$MRC" -ne 0 ]'
+"$ADV" mark "$FIRST" accepted "$WORK" >/dev/null 2>&1
+check "a resolvable id records the outcome" \
+  'grep >/dev/null "\"accepted\"" "$(sdir)/outcomes.jsonl"'
+# Only `superseded` names a second advisory, so only there does a third word mean
+# an id. Otherwise `mark <id> accepted /repo` would read the directory as one.
+"$ADV" mark "$FIRST" superseded "$WORK" >/dev/null 2>&1; MRC=$?
+check "superseded without the id it duplicates is refused" '[ "$MRC" -ne 0 ]'
+
+# Evidence is model-written text, and pathsSignature goes on to read whatever it
+# names. A non-leading traversal clears a startsWith("..") check while pointing
+# anywhere on the filesystem, so the boundary is resolved, not spelled.
+cat >"$WORK/citecheck.ts" <<EOF
+import { citedPaths } from "$HERE/../skills/kibitz/src/core.ts"
+const outside = citedPaths("x/../../../../../etc/passwd:1 /etc/passwd:2 ../../etc/hosts:3", process.cwd())
+const inside = citedPaths("inside.txt:7", process.cwd())
+console.log(outside.length, inside.length)
+EOF
+printf 'x\n' >"$WORK/inside.txt"
+CITE="$(cd "$WORK" && bun "$WORK/citecheck.ts" 2>&1)"
+check "a citation cannot escape the project it cites, but still finds what is in it" \
+  '[ "$CITE" = "0 1" ]' "expected '0 1', got '$CITE'"
+
+# Declining is how an operator ends a disagreement: it stays quiet even when the
+# cited code moves again, which is the one thing a signature check cannot do.
+LAST="$(tail -1 "$(sdir)/issues.jsonl" | jq -r .id | cut -c1-6)"
+"$ADV" mark "$LAST" declined "$WORK" >/dev/null 2>&1
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+printf 'export const a = 3  // edited again\n' >"$SUBJ"
+idfake "Refreshing an owned channel deletes the existing registration before adding the new one, and if claude mcp add fails the previous working registration is lost with no rollback." \
+       "$W2" "subject.ts:14-22"
+idrun
+check "a declined issue stays quiet even after its evidence changes" \
+  '[ "$(published)" -eq 0 ]' "published $(published)"
+
+check "stats separates volume from distinct issues and outcomes" \
+  '"$ADV" stats "$WORK" | grep >/dev/null "distinct issues" &&
+   "$ADV" stats "$WORK" | grep >/dev/null "repeats held back" &&
+   "$ADV" stats "$WORK" | grep >/dev/null "unmarked"' "$("$ADV" stats "$WORK")"
+
+check "the operator log carries the id the mark command takes" \
+  'grep >/dev/null "$FIRST" "$(sdir)/advice.log"'
+# Captured before the mute case below resets this direction's register.
+CLAUDE_ISSUES="$(wc -l <"$(sdir)/issues.jsonl")"
+
+# mute now matches the evidence too, so a whole file can be muted by path.
+"$ADV" mute "subject.ts" "$WORK" >/dev/null
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+rm -f "$(sdir)/seen" "$(sdir)/issues.jsonl"
+idfake "something entirely unrelated about caching" "b" "subject.ts:1"
+idrun
+check "mute matches a path in the evidence, not only the note" \
+  '[ "$(published)" -eq 0 ]' "published $(published)"
+"$ADV" mute clear "$WORK" >/dev/null
+
+# Both directions. Codex-advises-Claude ran above; this is Claude-advises-Codex,
+# which differs only in the runner upstream of the shared publication loop. The
+# stand-ins keep the real argument shape: bwrap execs what follows its `--`, and
+# the Claude runner reads its result from stdout as a success envelope.
+CXROOT="$(mktemp -d)"; CXBIN="$WORK/cxbin"; mkdir -p "$CXBIN"
+cat >"$CXBIN/bwrap" <<'FAKE'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do [ "$1" = "--" ] && { shift; break; }; shift; done
+exec "$@"
+FAKE
+cat >"$CXBIN/claude" <<'FAKE'
+#!/usr/bin/env bash
+cat >/dev/null
+cat <<'JSON'
+{"subtype":"success","structured_output":{"advisories":[
+ {"kind":"k","note":"Replacing an existing channel removes it before adding the new one. If claude mcp add fails, an owned registration has already been deleted, contrary to the otherwise preservation-oriented contract.",
+  "why_it_matters":"A transient CLI failure converts a failed install into lost user configuration.","evidence":"subject.ts:10-20","confidence":0.9}]}}
+JSON
+FAKE
+chmod +x "$CXBIN/bwrap" "$CXBIN/claude"
+cxsdir() {
+  local h; h="$(printf '%s' "$WORK" | cksum | tr -d ' ' | cut -c1-12)"
+  printf '%s/projects/%s/sessions/%s' "$CXROOT" "$h" "$SID"
+}
+cxrun() {
+  ADVISOR_STATE_ROOT="$CXROOT" KIBITZ_HOST=codex PATH="$CXBIN:$PATH" \
+    "$ADV" worker "$WORK" "$SID" "" >/dev/null 2>&1
+}
+ADVISOR_STATE_ROOT="$CXROOT" KIBITZ_HOST=codex "$ADV" on --host codex "$WORK" >/dev/null 2>&1
+cxrun
+CXN="$(find "$(cxsdir)/outbox" -name '*.json' 2>/dev/null | wc -l)"
+check "the Codex direction publishes and registers through the same loop" \
+  '[ "$CXN" -eq 1 ] && [ -s "$(cxsdir)/issues.jsonl" ]' "published $CXN"
+find "$(cxsdir)/outbox" -name '*.json' -delete 2>/dev/null
+cat >"$CXBIN/claude" <<'FAKE'
+#!/usr/bin/env bash
+cat >/dev/null
+cat <<'JSON'
+{"subtype":"success","structured_output":{"advisories":[
+ {"kind":"k2","note":"The replacement path deletes the existing registration before adding the new one. If claude mcp add fails, an owned registration is lost; add a failure-path test and decide on a rollback strategy before calling this preservation-oriented UX complete.",
+  "why_it_matters":"A transient CLI or config failure currently converts a failed install into destructive state change.","evidence":"subject.ts:14-22","confidence":0.9}]}}
+JSON
+FAKE
+chmod +x "$CXBIN/claude"
+cxrun
+check "and holds back a rewording of it, exactly as the Claude direction does" \
+  '[ "$(find "$(cxsdir)/outbox" -name "*.json" 2>/dev/null | wc -l)" -eq 0 ]'
+check "each direction keeps its own register, not a shared one" \
+  '[ "$(cxsdir)" != "$(sdir)" ] && [ "$(wc -l <"$(cxsdir)/issues.jsonl")" -eq 1 ] &&
+   [ "$CLAUDE_ISSUES" -eq 3 ]' \
+  "codex $(wc -l <"$(cxsdir)/issues.jsonl") / claude $CLAUDE_ISSUES"
+rm -rf "$CXROOT"
 
 echo
 echo "hot path"
