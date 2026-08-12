@@ -1,0 +1,4 @@
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<skills_instructions>boilerplate</skills_instructions>"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will update the host adapter."}]}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"functions.exec","input":"{\"cmd\":\"rg --files\"}"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Implement the adapter."}]}}

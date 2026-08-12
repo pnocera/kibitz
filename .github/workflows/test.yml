@@ -16,4 +16,6 @@ jobs:
       - name: Show versions
         run: bun --version && jq --version
       - name: Run acceptance tests
-        run: bash tests/run-tests.sh
+        run: |
+          bash tests/run-tests.sh
+          bash tests/dual-host.sh

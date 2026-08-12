@@ -23,7 +23,48 @@ import { cmdInstall, cmdLink, cmdUninstall } from "../src/install.ts"
 import { runChannel } from "../src/channel.ts"
 import { cmdWorker } from "../src/worker.ts"
 
-const [cmd, ...rest] = process.argv.slice(2)
+const [cmd, ...argv] = process.argv.slice(2)
+
+function takeHost(args: string[]): { scope: "claude" | "codex" | "all" | null; rest: string[] } {
+  const rest: string[] = []
+  let scope: "claude" | "codex" | "all" | null = null
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== "--host") { rest.push(args[i]!); continue }
+    const value = args[++i]
+    if (value !== "claude" && value !== "codex" && value !== "all") return { scope: null, rest: ["--invalid-host"] }
+    if (scope) return { scope: null, rest: ["--invalid-host"] }
+    scope = value
+  }
+  return { scope, rest }
+}
+
+const parsed = takeHost(argv)
+const scope = parsed.scope
+const rest = parsed.rest
+const hasOverride = Boolean(process.env.ADVISOR_STATE_ROOT)
+const hostsFor = (allByDefault: boolean): ("claude" | "codex")[] => {
+  if (scope === "all") return hasOverride ? [] : ["claude", "codex"]
+  if (scope) return [scope]
+  return allByDefault && !hasOverride ? ["claude", "codex"] : ["claude"]
+}
+const withHost = (host: "claude" | "codex", f: () => number): number => {
+  const prior = process.env.KIBITZ_HOST
+  process.env.KIBITZ_HOST = host
+  try { return f() } finally {
+    if (prior === undefined) delete process.env.KIBITZ_HOST
+    else process.env.KIBITZ_HOST = prior
+  }
+}
+const runControls = (allByDefault: boolean, f: () => number): number => {
+  const hosts = hostsFor(allByDefault)
+  if (hosts.length === 0) { process.stderr.write("kibitzer: --host all is unavailable with ADVISOR_STATE_ROOT\n"); return 2 }
+  let status = 0
+  for (const host of hosts) {
+    const next = withHost(host, f)
+    if (status === 0) status = next
+  }
+  return status
+}
 
 // A hook must never fail the turn. Whatever goes wrong -- unreadable state, a
 // full disk, a payload we cannot parse -- the answer is the same: say nothing
@@ -31,6 +72,9 @@ const [cmd, ...rest] = process.argv.slice(2)
 if (cmd === "hook") {
   let code = 0
   try {
+    if (process.env.KIBITZ_ADVISOR === "1" || rest[0] === "--invalid-host") process.exit(0)
+    if (scope === "all") process.exit(0)
+    if (scope) process.env.KIBITZ_HOST = scope
     const raw = await Bun.stdin.text().catch(() => "")
     code = runHook(rest[0] ?? "", raw)
   } catch { code = 0 }
@@ -39,25 +83,40 @@ if (cmd === "hook") {
 
 let status = 0
 try {
+  if (rest[0] === "--invalid-host") { process.stderr.write("kibitzer: --host must be claude, codex, or all\n"); process.exit(2) }
   switch (cmd) {
-    case "on":         status = cmdOn(rest[0]); break
-    case "off":        status = cmdOff(rest[0]); break
-    case "quiet":      status = cmdQuiet(rest[0], rest[1]); break
-    case "status":     status = cmdStatus(rest[0]); break
-    case "count":      status = cmdCount(rest[0]); break
-    case "tail":       status = cmdTail(rest[0]); break
-    case "log":        status = cmdLog(rest[0], rest[1]); break
-    case "pane":       status = cmdPane(rest[0]); break
+    case "on":         status = runControls(true, () => cmdOn(rest[0])); break
+    case "off":        status = runControls(true, () => cmdOff(rest[0])); break
+    case "quiet":      status = runControls(true, () => cmdQuiet(rest[0], rest[1])); break
+    case "status":     status = runControls(true, () => cmdStatus(rest[0])); break
+    case "count":      status = runControls(false, () => cmdCount(rest[0])); break
+    case "tail":       status = runControls(false, () => cmdTail(rest[0])); break
+    case "log":        status = runControls(false, () => cmdLog(rest[0], rest[1])); break
+    case "pane":       status = runControls(false, () => cmdPane(rest[0])); break
     case "lint":       status = cmdLint(rest[0]); break
     case "install":    status = cmdInstall(rest[0], rest[1]); break
     case "uninstall":  status = cmdUninstall(rest[0]); break
     case "link":       status = cmdLink(rest[0], rest[1]); break
-    case "advise-now": status = cmdAdviseNow(rest[0]); break
-    case "mute":       status = cmdMute(rest[0], rest[1]); break
-    case "stats":      status = cmdStats(rest[0]); break
-    case "statusline": status = cmdStatusline(rest[0]); break
-    case "doctor":     status = cmdDoctor(); break
-    case "worker":     status = cmdWorker(rest[0] ?? "", rest[1] ?? "", rest[2], rest[3]); break
+    case "advise-now": status = runControls(false, () => cmdAdviseNow(rest[0])); break
+    case "mute":       status = runControls(true, () => cmdMute(rest[0], rest[1])); break
+    case "stats":      status = runControls(false, () => cmdStats(rest[0])); break
+    case "statusline": status = runControls(false, () => cmdStatusline(rest[0])); break
+    case "doctor":
+      if (scope === "all") status = runControls(true, () => {
+        if (process.env.KIBITZ_HOST !== "codex") return cmdDoctor()
+        process.env.KIBITZ_DOCTOR_EXPLICIT = "1"
+        try { return cmdDoctor() } finally { delete process.env.KIBITZ_DOCTOR_EXPLICIT }
+      })
+      else if (scope) status = withHost(scope, () => {
+        process.env.KIBITZ_DOCTOR_EXPLICIT = "1"
+        try { return cmdDoctor() } finally { delete process.env.KIBITZ_DOCTOR_EXPLICIT }
+      })
+      else status = runControls(true, () => cmdDoctor())
+      break
+    case "worker":
+      if (scope === "all") { status = 2; process.stderr.write("kibitzer: worker requires one host\n") }
+      else { if (scope) process.env.KIBITZ_HOST = scope; status = cmdWorker(rest[0] ?? "", rest[1] ?? "", rest[2], rest[3]) }
+      break
     // Long-lived: serves MCP on stdio until Claude Code closes it.
     case "channel":    runChannel(); await new Promise(() => {}); break
     case undefined:

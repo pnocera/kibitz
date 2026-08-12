@@ -1,32 +1,36 @@
 # kibitz
 
-**Codex as a background advisory process for Claude Code.**
+**Cross-host advisory: Codex for Claude Code, and Claude for Codex.**
 
-While Claude Code works, a detached `codex exec` watches the session — tool activity, turn endings,
-the working tree — and offers whatever it thinks is worth saying. Its remarks are injected into
-Claude's context at the next tool call, and always written to a durable log you can watch live.
+While either host works, a detached observer watches the session, tool activity, and working tree.
+Claude Code uses a read-only Codex runner. Codex uses a tool-disabled Claude runner in a
+network-capable read-only Linux sandbox. Advice is injected at the next supported input boundary
+and written to a durable log.
 
 It is **advisory, not review**: no verdicts, no severities, no pass/fail, and it blocks nothing.
 Claude decides what is worth acting on; you see everything either way.
 
 ```
-tool activity ─► hook ─► events/ ─┐
-turn ends ────► hook ─────────────┴─► detached codex exec ─┬─► outbox/ ─► next tool call ─► Claude
-                (≤50ms, never blocks)                      └─► advice.log ─► you
+Claude Code hook ─► Codex runner ─┐
+                                  ├─► host-scoped outbox ─► next input boundary
+Codex hook ──────► Claude runner ─┘    (hooks never block)  └─► advice.log
 ```
 
 ## Install
 
 ```bash
-npx skills add -g -a claude-code pnocera/kibitz
+npx skills add pnocera/kibitz -g -a claude-code codex
 ```
 
 Restart Claude Code, then ask it to opt in for the current directory:
 
 > run `kibitzer on`
 
-That is the whole installation. kibitz ships as a Claude Code **plugin**, so the hooks come with it:
-nothing to merge into `settings.json`.
+Claude Code ships hooks through its plugin. Codex needs one more activation step after its skill is
+installed: run `kibitzer install codex-user`, approve Codex's normal hook-trust prompt, and start
+a new Codex session. Do not use a trust-bypass flag. Registration rewrites `hooks.json` after
+creating a `.kibitz-backup`; existing Codex hooks can require re-approval. The skills installer
+makes a skill visible; it does not itself activate Codex hooks.
 
 Note that `kibitzer` is on **Claude Code's Bash tool** `PATH`, not your shell's — that is what plugins
 expose. Asking Claude to run it works; typing it in your own terminal will not, unless you use the
@@ -44,17 +48,17 @@ most Debian/Ubuntu systems, and a plugin's `bin/` does not win over `/usr/bin`, 
 executable `kibitz` means the wrong program runs. If `kibitzer` is shadowed on your machine, call it
 by path: `~/.claude/skills/kibitz/bin/kibitzer`.
 
-**Why those two flags.** `-a claude-code` matters: without it the installer symlinks the skill into
-every agent directory it knows about — around fifty of them — and kibitz is useless to all of them,
-since its hooks are Claude Code's mechanism. `-g` installs to `~/.claude/skills/kibitz`, which loads
-in every project. A project-scope install instead lands in `.claude/skills/kibitz`, which loads only
-after you accept the workspace trust dialog and only when Claude Code starts from that exact
-directory.
+**Why those selectors.** `-a claude-code codex` installs only to the two supported agents. Without
+them the installer can link the skill into every agent directory it knows about. `-g` installs to
+`~/.claude/skills/kibitz` and `~/.agents/skills/kibitz`, which load in every project. A project-scope
+install instead lands in an agent-specific project directory and loads only after its workspace-trust
+dialog is accepted.
 
 To update: `npx skills update -g`.
 
 Requires [Bun](https://bun.sh) (tested on 1.3.14, which is what CI pins), `codex` (tested on
-codex-cli 0.147.0), and coreutils.
+codex-cli 0.147.0), and coreutils. The Codex-host direction also needs authenticated `claude`,
+`bwrap`, and Linux with user namespaces enabled.
 
 **Bun must be on the PATH Claude Code gives its hooks.** It is the interpreter in the
 executable's shebang, so without it a hook fails before any of kibitz's own error handling
@@ -79,9 +83,9 @@ command on your `PATH`. None of this is needed for a plugin install.
 ## Use
 
 ```
-kibitzer on | off                 opt in / out for this directory
-kibitzer quiet on | off           keep analysing and logging, stop injecting
-kibitzer status                   what is enabled, pending, running
+kibitzer on | off [--host H]      opt in / out for this directory
+kibitzer quiet on | off [--host H] keep analysing and logging, stop injecting
+kibitzer status [--host H]        what is enabled, pending, running
 kibitzer log [cwd] [n]            what has been said
 kibitzer tail [cwd]               follow it live
 kibitzer pane [cwd]               Herdr side pane following the log
@@ -90,20 +94,25 @@ kibitzer advise-now [cwd]         ask for a contribution now, without waiting
 kibitzer mute <text>|list|clear   stop hearing about a topic
 kibitzer stats [cwd]              what kinds of things it has been saying
 kibitzer lint <file>              fail if a file reads like a review gate
+kibitzer install codex-user       register user-scoped Codex hooks
 ```
 
-Default is **off**, per directory. `off` is immediate: it disables, reaps any in-flight Codex, and
+Use `--host claude` or `--host codex` for one direction. Controls (`on`, `off`, `quiet`, and
+`status`) without a host selector act on both installed hosts. Session-specific commands (`log`,
+`tail`, `stats`, and `advise-now`) default to Claude; pass `--host codex` for a Codex session.
+Default is **off**, per directory. `off` is immediate: it disables, reaps in-flight work, and
 clears pending advice and the tap queue.
 
 ## Behaviour
 
-**When it looks.** Turn endings and failed tool calls always trigger a cycle. Ordinary edits are
-debounced (`ADVISOR_MIN_INTERVAL`, default 45s). Read-only tools never trigger one. Only one cycle
-runs at a time per session.
+**When it looks.** In Claude Code, turn endings and failed tool calls trigger a cycle immediately.
+In Codex, only live-proven hook events are used and normal post-tool activity is debounced
+(`ADVISOR_MIN_INTERVAL`, default 45s). Known non-mutating built-in tools do not trigger one;
+shell commands are observed because they can mutate. Only one cycle runs at a time per session.
 
-**What it sees.** A bounded tail of the transcript (`ADVISOR_TRANSCRIPT_LINES`, default 400), the
-tool calls since the last cycle, and `git diff`. It reads the repository itself; the summary is a
-pointer, not a source.
+**What it sees.** A bounded transcript tail (`ADVISOR_TRANSCRIPT_LINES`, default 400), tool calls
+since the last cycle, and `git diff`. The Codex advisor can inspect the repository read-only. The
+Claude advisor receives only that bounded material because its tools are disabled.
 
 **What it is told.** As little as possible. The prompt gives Codex the situation and one open
 question — no checklist, no categories, no severity rubric.
@@ -220,13 +229,21 @@ reading, invocation confinement, the plugin package (manifest, hook events, relo
 upgrade from the two-file state layout, epoch boundaries across off/on, mute at both publication and
 delivery, the channel's MCP handshake and its parity with the hook drain, and hot-path latency.
 
-`tests/smoke-plugin.sh` is separate and opt-in, and `SMOKE_CHANNEL=1` adds a second phase that
+`tests/smoke-plugin.sh --host claude` is separate and opt-in, and `SMOKE_CHANNEL=1` adds a second phase that
 queues an advisory and checks a real Claude launched with the development-channel flag actually
 claims it — the unit tests can prove the queue logic and the `.mcp.json` shape, but not that Claude
 discovers and launches the channel. The base phase: it installs into the real layout, starts a headless
 Claude Code, and asserts a hook actually fired. It needs an authenticated CLI and a couple of
 minutes, so CI cannot run it — but the JSON-shape tests never cross the loader boundary, and this
 package has already shipped one install that validated perfectly and loaded nothing.
+
+`bash tests/smoke-npx-skills.sh` checks the published combined `npx skills` command in a clean
+home and verifies both installed layouts plus Codex hook registration. `--live` adds the two host
+loader checks; the Codex half is interactive and needs `CODEX_API_KEY` because it uses a disposable
+`CODEX_HOME` to require normal hook-trust approval.
+
+Run `bash tests/dual-host.sh` with the legacy suite after changing host selection, Codex hooks,
+state roots, or runner boundaries. CI runs both suites.
 
 The concurrency and confinement tests were each verified to **fail** against the pre-fix code. A
 test that passes either way is worth nothing — if you change the locking, the fingerprint, the

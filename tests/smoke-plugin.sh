@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Crosses the Claude Code loader boundary, which run-tests.sh deliberately does
-# not: it installs into the exact layout `npx skills add -g -a claude-code`
+# not: it installs into the exact layout `npx skills add pnocera/kibitz -g -a claude-code`
 # produces, starts a real headless session, and asserts a hook actually fired.
 #
 # Not part of the default suite: it needs an authenticated Claude Code and takes
 # a couple of minutes, so CI cannot run it. Run it by hand after touching the
 # plugin manifest, hooks/hooks.json, the install layout, or path resolution.
 #
-#   bash tests/smoke-plugin.sh
+#   bash tests/smoke-plugin.sh --host claude
+#   CODEX_API_KEY=... bash tests/smoke-plugin.sh --host codex
 #
 # Why it exists: the package combines ordinary skill discovery (SKILL.md in a
 # skills directory) with plugin hook discovery (.claude-plugin + hooks/hooks.json).
@@ -18,16 +19,66 @@
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUG="$HERE/../skills/kibitz"
+PLUG="${KIBITZ_PLUGIN_DIR:-$HERE/../skills/kibitz}"
+
+host=claude
+if [ "${1:-}" = "--host" ]; then
+  host="${2:-}"
+  shift 2
+fi
+[ "$#" -eq 0 ] || { echo "usage: bash tests/smoke-plugin.sh [--host claude|codex]" >&2; exit 2; }
+[ "$host" = claude ] || [ "$host" = codex ] || { echo "smoke: --host must be claude or codex" >&2; exit 2; }
+
+if [ "$host" = codex ]; then
+  command -v codex >/dev/null || { echo "smoke: codex not on PATH"; exit 2; }
+  [ -n "${CODEX_API_KEY:-}" ] || {
+    echo "smoke: Codex uses a disposable CODEX_HOME, so set CODEX_API_KEY for this interactive smoke." >&2
+    exit 2
+  }
+
+  ROOT="$(mktemp -d)"
+  TEST_HOME="$ROOT/home"
+  CODEX_ROOT="$ROOT/codex"
+  PROJ="$ROOT/project"
+  trap 'rm -rf "$ROOT"' EXIT
+  mkdir -p "$TEST_HOME/.agents/skills" "$PROJ"
+  cp -r "$PLUG" "$TEST_HOME/.agents/skills/kibitz"
+  INSTALLED="$TEST_HOME/.agents/skills/kibitz"
+
+  CODEX_HOME="$CODEX_ROOT" "$INSTALLED/bin/kibitzer" install codex-user >/dev/null
+  jq -e '.hooks.UserPromptSubmit[0].hooks[0].command | contains("hook --host codex UserPromptSubmit")' \
+    "$CODEX_ROOT/hooks.json" >/dev/null || { echo "smoke: Codex hook registration missing" >&2; exit 1; }
+  CODEX_HOME="$CODEX_ROOT" "$INSTALLED/bin/kibitzer" on --host codex "$PROJ" >/dev/null
+
+  cat <<EOF
+smoke: starting an interactive Codex session with a disposable CODEX_HOME.
+Approve the normal hook-trust prompt for $CODEX_ROOT/hooks.json, submit any
+ordinary prompt, then exit Codex. Do not use a trust-bypass flag.
+EOF
+  ( cd "$PROJ" && HOME="$TEST_HOME" CODEX_HOME="$CODEX_ROOT" codex )
+
+  h="$(printf '%s' "$PROJ" | cksum | tr -d ' ' | cut -c1-12)"
+  if [ -f "$CODEX_ROOT/advisor/projects/$h/current-session" ]; then
+    echo "smoke: PASS — trusted Codex hook created Codex-host session state"
+    exit 0
+  fi
+  cat >&2 <<EOF
+smoke: FAIL — no Codex-host session state was created.
+Check that normal hook trust was approved, a prompt was submitted, and Codex
+started with the disposable CODEX_HOME printed above.
+EOF
+  exit 1
+fi
 
 command -v claude >/dev/null || { echo "smoke: claude not on PATH"; exit 2; }
 
-CFG="$(mktemp -d)/cfg"; mkdir -p "$CFG/skills"
-STATE="$(mktemp -d)"
-PROJ="$(mktemp -d)"
-trap 'rm -rf "$CFG" "$STATE" "$PROJ"' EXIT
+ROOT="$(mktemp -d)"
+CFG="$ROOT/cfg"; mkdir -p "$CFG/skills"
+STATE="$ROOT/state"
+PROJ="$ROOT/project"; mkdir -p "$PROJ"
+trap 'rm -rf "$ROOT"' EXIT
 
-# The layout `npx skills add -g -a claude-code` produces: the plugin directory
+# The layout `npx skills add pnocera/kibitz -g -a claude-code` produces: the plugin directory
 # sitting directly in the personal skills dir.
 cp -r "$PLUG" "$CFG/skills/kibitz"
 [ -f "$CFG/skills/kibitz/.claude-plugin/plugin.json" ] || { echo "smoke: manifest missing"; exit 1; }

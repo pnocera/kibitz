@@ -16,8 +16,28 @@ export const HOME = (() => {
   return path.resolve(path.dirname(self), "..")
 })()
 
-export const STATE_ROOT =
-  process.env.ADVISOR_STATE_ROOT ?? path.join(os.homedir(), ".claude", "advisor")
+export type Host = "claude" | "codex"
+export type HostScope = Host | "all"
+
+export const validHost = (v: unknown): v is Host => v === "claude" || v === "codex"
+
+/** The entrypoint sets this before it invokes a host-specific command. Claude
+ *  remains the default so existing hooks, scripts, and test overrides keep
+ *  their state layout without an argument. */
+export const currentHost = (): Host => process.env.KIBITZ_HOST === "codex" ? "codex" : "claude"
+
+export function stateRoot(host = currentHost()): string {
+  if (process.env.ADVISOR_STATE_ROOT) return process.env.ADVISOR_STATE_ROOT
+  if (host === "codex")
+    return path.join(process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"), "advisor")
+  const legacy = path.join(os.homedir(), ".claude", "advisor")
+  const configured = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "advisor")
+  if (configured === legacy) return legacy
+  // Preserve an enabled historical root when a later CLAUDE_CONFIG_DIR only
+  // changes where Claude stores its own configuration.
+  if (!exists(path.join(configured, "projects")) && exists(path.join(legacy, "projects"))) return legacy
+  return configured
+}
 export const SCHEMA = path.join(HOME, "lib", "advice.schema.json")
 export const PROMPT_TMPL = path.join(HOME, "lib", "prompt.tmpl")
 export const BIN = path.join(HOME, "bin", "kibitzer")
@@ -33,6 +53,7 @@ const num = (v: string | undefined, d: number) => {
 export const MAX_PER_DRAIN = num(process.env.ADVISOR_MAX_PER_DRAIN, 3)
 export const LEASE_SECONDS = num(process.env.ADVISOR_LEASE_SECONDS, 120)
 export const CODEX_TIMEOUT = num(process.env.ADVISOR_CODEX_TIMEOUT, 300)
+export const CLAUDE_TIMEOUT = num(process.env.ADVISOR_CLAUDE_TIMEOUT, 300)
 export const MIN_INTERVAL = num(process.env.ADVISOR_MIN_INTERVAL, 45)
 export const TRANSCRIPT_LINES = num(process.env.ADVISOR_TRANSCRIPT_LINES, 400)
 export const ACTIVITY_LINES = num(process.env.ADVISOR_ACTIVITY_LINES, 120)
@@ -63,7 +84,23 @@ export function hashPath(s: string): string {
 export const validSid = (v: unknown): v is string =>
   typeof v === "string" && /^[A-Za-z0-9._-]+$/.test(v) && v !== "." && v !== ".."
 
-export const projDir = (cwd: string) => path.join(STATE_ROOT, "projects", hashPath(cwd))
+const markerPath = (host = currentHost()) => path.join(stateRoot(host), "host")
+
+/** Refuse a host collision before it can turn two independent sessions into one
+ *  queue. An existing unmarked state root is the historical Claude root. */
+export function ensureHostRoot(host = currentHost()): boolean {
+  const root = stateRoot(host)
+  const marker = read(markerPath(host))?.trim()
+  if (marker) return marker === host
+  let entries: string[] = []
+  try { entries = fs.readdirSync(root) } catch {}
+  if (host === "codex" && entries.length > 0) return false
+  try { fs.mkdirSync(root, { recursive: true }); fs.writeFileSync(markerPath(host), host + "\n") }
+  catch { return false }
+  return true
+}
+
+export const projDir = (cwd: string, host = currentHost()) => path.join(stateRoot(host), "projects", hashPath(cwd))
 export const sessDir = (cwd: string, sid: string) => path.join(projDir(cwd), "sessions", sid)
 
 // ------------------------------------------------------------ small fs ----
@@ -346,7 +383,8 @@ export function readState(cwd: string): State {
 }
 
 /** Always advances the epoch: every transition invalidates queued work. */
-export function writeState(cwd: string, enabled: boolean) {
+export function writeState(cwd: string, enabled: boolean): boolean {
+  if (!ensureHostRoot()) return false
   const p = projDir(cwd)
   mkdirp(p)
   const cur = readStateRaw(p)
@@ -357,7 +395,8 @@ export function writeState(cwd: string, enabled: boolean) {
   try {
     fs.writeFileSync(tmp, `${enabled ? 1 : 0} ${next}\n`)
     fs.renameSync(tmp, path.join(p, "state"))
-  } catch {} finally { rm(tmp) }
+    return true
+  } catch { return false } finally { rm(tmp) }
 }
 
 function readStateRaw(p: string): State {
@@ -370,14 +409,6 @@ function readStateRaw(p: string): State {
 export const epochOf = (cwd: string) => readState(cwd).epoch
 export const isEnabled = (cwd: string) => readState(cwd).enabled
 export const isQuiet = (cwd: string) => exists(path.join(projDir(cwd), "quiet"))
-
-// Tools that only look at things: nothing to remark on, so they never trigger a
-// cycle, though the worker still sees them through the transcript.
-const NAVIGATION = new Set([
-  "Read", "Glob", "Grep", "TodoWrite", "NotebookRead",
-  "WebFetch", "WebSearch", "ListMcpResources", "Task",
-])
-export const isNavigation = (tool: string) => NAVIGATION.has(tool)
 
 /** Substring, case-insensitive, against "<kind> <note>". */
 export function isMuted(cwd: string, text: string): boolean {
@@ -392,6 +423,7 @@ export function initSess(cwd: string, sid: string): string {
   // first becomes directories on disk, so every present and future caller is
   // covered by one check.
   if (!validSid(sid)) throw new Error(`invalid session id: ${JSON.stringify(sid)}`)
+  if (!ensureHostRoot()) throw new Error(`state root belongs to another host: ${stateRoot()}`)
   const d = sessDir(cwd, sid)
   for (const sub of ["tmp", "outbox", "outbox-processing", "events", "events-processing"])
     mkdirp(path.join(d, sub))
@@ -422,7 +454,7 @@ export const currentSession = (cwd: string): string | null => {
 // allowing them would swallow `/usr/bin/logger /x/bin/kibitzer hook Stop`, and
 // deleting a command a user wrote is worse than anything it would buy.
 export const OURS_RE =
-  /^("\$\{CLAUDE_PLUGIN_ROOT\}"\/bin\/kibitzer|"\/[^"]*\/bin\/kibitzer"|\/[^ "]*\/bin\/kibitzer) hook [A-Za-z]+$/
+  /^("\$\{CLAUDE_PLUGIN_ROOT\}"\/bin\/kibitzer|"\/[^"]*\/bin\/kibitzer"|\/[^ "]*\/bin\/kibitzer) hook (?:--host codex )?[A-Za-z]+$/
 
 export const isoNow = () => {
   const d = new Date()

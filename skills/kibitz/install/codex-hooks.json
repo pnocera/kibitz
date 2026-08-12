@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "\"__KIBITZ__\" hook --host codex PreToolUse", "timeout": 2 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "\"__KIBITZ__\" hook --host codex UserPromptSubmit", "timeout": 2 }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "\"__KIBITZ__\" hook --host codex PostToolUse", "timeout": 2 }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "\"__KIBITZ__\" hook --host codex SessionEnd", "timeout": 2 }] }]
+  }
+}

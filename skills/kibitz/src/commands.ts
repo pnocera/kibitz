@@ -7,32 +7,39 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import {
-  BIN, HOME, PROMPT_TMPL, SCHEMA,
-  currentSession, deliveredCount, epochOf, exists, isEnabled, listJson, mkdirp, projDir, read,
+  BIN, HOME, OURS_RE, PROMPT_TMPL, SCHEMA,
+  currentHost, currentSession, deliveredCount, ensureHostRoot, epochOf, exists, isEnabled, listJson, mkdirp, projDir, read,
   killTree, readState, rm, sessDir, verifiedWorkerPid, which, writeState,
 } from "./core.ts"
+import { adapterFor } from "./hosts.ts"
 
 const out = (s: string) => process.stdout.write(s + "\n")
 const err = (s: string) => process.stderr.write(s + "\n")
 
 export function cmdOn(cwd = process.cwd()): number {
+  if (!writeState(cwd, true)) {
+    err(`kibitzer: state root belongs to another host: ${currentHost()}`)
+    return 1
+  }
   const p = projDir(cwd)
   mkdirp(path.join(p, "sessions"))
   try { fs.writeFileSync(path.join(p, "cwd"), cwd + "\n") } catch {}
-  writeState(cwd, true)
   rm(path.join(p, "quiet"))
-  out(`kibitzer: on for ${cwd}`)
+  out(`kibitzer: on for ${cwd} (${currentHost()} host)`)
   out(`  state: ${p}`)
   out("  log:   kibitzer tail   (or: kibitzer pane, for a Herdr side pane)")
   return 0
 }
 
 export function cmdOff(cwd = process.cwd()): number {
+  if (!writeState(cwd, false)) {
+    err(`kibitzer: state root belongs to another host: ${currentHost()}`)
+    return 1
+  }
   const p = projDir(cwd)
   mkdirp(p)
   // Bump first: everything queued, and everything an in-flight producer is
   // about to write, belongs to the old epoch and is inert from this instant.
-  writeState(cwd, false)
   rm(path.join(p, "enabled"))       // legacy flag: never let migration resurrect it
 
   let killed = 0
@@ -49,11 +56,12 @@ export function cmdOff(cwd = process.cwd()): number {
     for (const q of ["outbox", "outbox-processing", "events", "events-processing"])
       for (const f of listJson(path.join(sessions, s, q))) rm(f)
   }
-  out(`kibitzer: off for ${cwd} (reaped ${killed} in-flight, cleared pending advisories)`)
+  out(`kibitzer: off for ${cwd} (${currentHost()} host; reaped ${killed} in-flight, cleared pending advisories)`)
   return 0
 }
 
 export function cmdQuiet(mode = "on", cwd = process.cwd()): number {
+  if (!ensureHostRoot()) { err(`kibitzer: state root belongs to another host: ${currentHost()}`); return 1 }
   const p = projDir(cwd)
   mkdirp(p)
   if (mode === "on") {
@@ -68,7 +76,7 @@ export function cmdQuiet(mode = "on", cwd = process.cwd()): number {
 
 export function cmdStatus(cwd = process.cwd()): number {
   const p = projDir(cwd)
-  process.stdout.write(`kibitzer  ${cwd}\n`)
+  process.stdout.write(`kibitzer  ${cwd}  (${currentHost()} host)\n`)
   process.stdout.write(`  enabled : ${isEnabled(cwd) ? "yes" : "no  (kibitzer on)"}\n`)
   process.stdout.write(`  quiet   : ${exists(path.join(p, "quiet")) ? "yes" : "no"}\n`)
   if (!exists(p)) { process.stdout.write("  state   : none yet\n"); return 0 }
@@ -85,7 +93,7 @@ export function cmdStatus(cwd = process.cwd()): number {
   // ledger lines together: on a session upgraded from the ledger-only version,
   // either record alone is a partial count.
   process.stdout.write(`  claimed : ${deliveredCount(d)} advisories committed for delivery\n`)
-  process.stdout.write(`  codex   : ${verifiedWorkerPid(path.join(d, "worker.pid")) ? "running" : "idle"}\n`)
+  process.stdout.write(`  advisor : ${adapterFor(currentHost()).advisorLabel} ${verifiedWorkerPid(path.join(d, "worker.pid")) ? "running" : "idle"}\n`)
   const stuck = pending.filter(f => {
     try { return Date.now() - fs.statSync(f).mtimeMs > 3 * 60000 } catch { return false }
   }).length
@@ -196,6 +204,7 @@ export function cmdMute(arg?: string, cwd = process.cwd()): number {
   }
   if (arg === "clear") { rm(path.join(p, "mutes")); out("kibitzer: mutes cleared"); return 0 }
   if (!arg) { err("usage: kibitzer mute <text> | list | clear"); return 2 }
+  if (!ensureHostRoot()) { err(`kibitzer: state root belongs to another host: ${currentHost()}`); return 1 }
   mkdirp(p)
   try { fs.appendFileSync(path.join(p, "mutes"), arg + "\n") } catch {}
   out(`kibitzer: muting advisories matching '${arg}'`)
@@ -233,7 +242,7 @@ export function cmdAdviseNow(cwd = process.cwd()): number {
   try {
     log = fs.openSync(path.join(d, "worker.log"), "a")
     const child = spawn("setsid",
-      [BIN, "worker", cwd, sid, latestTranscript(sid), epochOf(cwd)],
+      [BIN, "worker", cwd, sid, read(path.join(d, "transcript"))?.trim() || latestTranscript(sid), epochOf(cwd)],
       { detached: true, stdio: ["ignore", log, log] })
     child.on("error", () => { if (log !== undefined) try { fs.closeSync(log) } catch {} })
     child.unref()
@@ -245,7 +254,9 @@ export function cmdAdviseNow(cwd = process.cwd()): number {
   return 0
 }
 
-/** Hooks supply the transcript path; a manual cycle has no payload to read. */
+/** Old state has no persisted hook transcript. Keep that Claude-only fallback
+ * so upgrading does not make an existing manual command lose all context. New
+ * sessions from either host use the hook-recorded path above. */
 function latestTranscript(sid: string): string {
   const r = spawnSync("find", [path.join(os.homedir(), ".claude", "projects"),
     "-name", `${sid}.jsonl`, "-type", "f"], { encoding: "utf8" })
@@ -256,26 +267,56 @@ export function cmdDoctor(): number {
   let bad = 0
   // bun first: it is the shebang's interpreter, so without it on the hook PATH
   // `env` fails before any of our exit-0 handling can run.
-  for (const c of ["bun", "codex", "flock", "setsid", "timeout", "tail", "find"]) {
+  for (const c of ["bun", "flock", "setsid", "timeout", "tail", "find"]) {
     if (which(c)) out(`  ok    ${c}`)
     else { out(`  MISS  ${c}`); bad = 1 }
   }
+  const codexDirection = currentHost() === "codex"
+  const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex")
+  const codexHooks = read(path.join(codexHome, "hooks.json")) ?? ""
+  // Bare doctor shows both directions, but an absent optional Codex direction
+  // must not turn a working Claude-only installation into an error. An explicit
+  // Codex selector or registered Kibitz Codex hook makes its missing tools
+  // actionable. OURS_RE is path-agnostic so the documented two-copy install is
+  // recognised whichever copy runs doctor.
+  let codexRegistered = false
+  try {
+    const hooks = JSON.parse(codexHooks)?.hooks ?? {}
+    codexRegistered = Object.values(hooks).some((groups: any) => Array.isArray(groups)
+      && groups.some((group: any) => Array.isArray(group?.hooks)
+        && group.hooks.some((hook: any) => typeof hook?.command === "string" && OURS_RE.test(hook.command))))
+  } catch {}
+  const codexRequired = process.env.KIBITZ_DOCTOR_EXPLICIT === "1"
+    || codexRegistered
+  for (const c of codexDirection ? ["claude", "bwrap"] : ["codex"]) {
+    if (which(c)) out(`  ok    ${c}${codexDirection ? " (Codex direction)" : " (Claude direction)"}`)
+    else {
+      out(`  MISS  ${c}${codexDirection ? " (Codex direction)" : " (Claude direction)"}`)
+      if (!codexDirection || codexRequired) bad = 1
+    }
+  }
   out(`  ${exists(SCHEMA) ? "ok" : "MISS"}  schema ${SCHEMA}`)
   out(`  ${exists(PROMPT_TMPL) ? "ok" : "MISS"}  prompt ${PROMPT_TMPL}`)
+  if (codexDirection && process.platform !== "linux") {
+    out("  MISS  Codex direction requires Linux")
+    if (codexRequired) bad = 1
+  }
   // If a future codex gains confinement flags on `resume`, incremental cycles
   // become possible. Grep the help text; the exit status alone is not a signal.
-  const h = spawnSync("codex", ["exec", "resume", "--help"], { encoding: "utf8" })
-  if (`${h.stdout ?? ""}${h.stderr ?? ""}`.includes("--sandbox"))
-    out("  NOTE  this codex supports resume --sandbox; incremental cycles are possible")
+  if (!codexDirection) {
+    const h = spawnSync("codex", ["exec", "resume", "--help"], { encoding: "utf8" })
+    if (`${h.stdout ?? ""}${h.stderr ?? ""}`.includes("--sandbox"))
+      out("  NOTE  this codex supports resume --sandbox; incremental cycles are possible")
+  }
   return bad
 }
 
-export const USAGE = `kibitz — Codex as a background advisory process for Claude Code
+export const USAGE = `kibitz — cross-host background advisory
 
-  kibitzer on [cwd]            opt in for this project
-  kibitzer off [cwd]           opt out; reaps in-flight work and pending advice
-  kibitzer quiet on|off        keep analysing and logging, stop injecting
-  kibitzer status [cwd]        what is enabled, pending, running
+  kibitzer on [cwd] [--host H] opt in for this project
+  kibitzer off [cwd] [--host H] opt out; reaps in-flight work and pending advice
+  kibitzer quiet on|off [--host H] keep analysing and logging, stop injecting
+  kibitzer status [cwd] [--host H] what is enabled, pending, running
   kibitzer advise-now [cwd]    ask for a contribution now, without waiting
   kibitzer mute <text>|list|clear   stop hearing about a topic
   kibitzer stats [cwd]         what kinds of things it has been saying
@@ -284,13 +325,20 @@ export const USAGE = `kibitz — Codex as a background advisory process for Clau
   kibitzer pane [cwd]          open a Herdr side pane following the log
   kibitzer count [cwd]         pending count (for the statusline)
   kibitzer lint <file>         fail if a file contains review/gate language
-  kibitzer doctor              check dependencies
+  kibitzer doctor [--host H]   check dependencies for one direction or both
   kibitzer link [dir]          put a \`kibitzer\` command on your PATH (~/.local/bin)
-  kibitzer install [project|user]    merge hooks into settings.json (backed up)
-  kibitzer uninstall [project|user]  remove them again
+  kibitzer install [claude-project|claude-user|codex-user] [--force]
+                               register hooks (bare install means claude-project)
+  kibitzer uninstall [claude-project|claude-user|codex-user]
+                               remove only kibitzer hook entries
   kibitzer statusline [cwd]    pending-count segment for the status line
 
   kibitzer channel             MCP channel server; pushes advice without waiting
                                for a tool call (opt-in, see README)
-  kibitzer hook <Event>        hook entrypoint; reads the payload on stdin
-  kibitzer worker <cwd> <sid> [transcript]   one Codex cycle (detached by the hook)`
+  kibitzer hook [--host H] <Event>  hook entrypoint; reads the payload on stdin
+  kibitzer worker [--host H] <cwd> <sid> [transcript]  one advisor cycle
+
+  H is claude, codex, or all. Controls default to both hosts when no state-root
+  override is set. Session-specific read commands default to Claude; select
+  --host codex for a Codex session. With ADVISOR_STATE_ROOT, --host all is
+  rejected and Claude is the default for compatibility.`

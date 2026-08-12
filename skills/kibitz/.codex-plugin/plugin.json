@@ -1,0 +1,18 @@
+{
+  "name": "kibitz",
+  "version": "0.3.0",
+  "description": "Claude as a background advisory process for Codex.",
+  "author": { "name": "Pierre Nocera" },
+  "homepage": "https://github.com/pnocera/kibitz",
+  "repository": "https://github.com/pnocera/kibitz",
+  "license": "MIT",
+  "interface": {
+    "displayName": "Kibitz",
+    "shortDescription": "Claude advice for Codex sessions",
+    "longDescription": "Run Claude as an asynchronous advisory observer for Codex sessions.",
+    "developerName": "Pierre Nocera",
+    "category": "Productivity",
+    "capabilities": ["Advisory"],
+    "defaultPrompt": ["Enable Claude advice for this Codex project."]
+  }
+}

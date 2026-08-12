@@ -13,14 +13,17 @@ const err = (s: string) => process.stderr.write(s + "\n")
 const out = (s: string) => process.stdout.write(s + "\n")
 
 const targetFor = (scope: string): string | null =>
-  scope === "project" ? path.join(process.cwd(), ".claude", "settings.json")
-  : scope === "user" ? path.join(os.homedir(), ".claude", "settings.json")
+  scope === "project" || scope === "claude-project" ? path.join(process.cwd(), ".claude", "settings.json")
+  : scope === "user" || scope === "claude-user" ? path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "settings.json")
+  : scope === "codex-user" ? path.join(process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"), "hooks.json")
   : null
+
+const templateFor = (scope: string) => scope === "codex-user" ? "codex-hooks.json" : "hooks.json"
 
 /** A user-scope install writes this checkout's absolute path into the global
  *  settings, so it must not point at somewhere transient. */
 const isPortableHome = () =>
-  !(/\/\.agents\/skills\//.test(HOME) || /\/node_modules\//.test(HOME) || HOME.startsWith("/tmp/"))
+  !(/\/node_modules\//.test(HOME) || (HOME.startsWith("/tmp/") && !/\/\.agents\/skills\//.test(HOME)))
 
 interface HookEntry { hooks?: { type?: string; command?: string; timeout?: number }[] }
 
@@ -37,17 +40,22 @@ function stripOurs(entries: HookEntry[]): HookEntry[] {
 
 export function cmdInstall(scope = "project", force?: string): number {
   const target = targetFor(scope)
-  if (!target) { err("usage: kibitzer install [project|user] [--force]"); return 2 }
+  if (!target) { err("usage: kibitzer install [claude-project|claude-user|codex-user] [--force]"); return 2 }
 
-  if (scope === "user" && !isPortableHome() && force !== "--force") {
+  if ((scope === "user" || scope === "claude-user" || scope === "codex-user") && !isPortableHome() && force !== "--force") {
     err("kibitzer: refusing a user-scope install from a transient location.")
     err("  This copy lives at:")
     err(`    ${HOME}`)
-    err("  Global hooks would hard-code that path, and every Claude session would break")
-    err("  if it is moved or removed. Either:")
-    err("    - clone kibitz somewhere stable and run 'kibitzer install user' from there, or")
-    err("    - use 'kibitzer install' (project scope) here, or")
-    err("    - re-run with --force if you are sure this path is permanent.")
+    if (scope === "codex-user") {
+      err("  Global Codex hooks would hard-code that path and break if it moves. Either:")
+      err("    - install this skill somewhere stable and run 'kibitzer install codex-user', or")
+      err("    - re-run 'kibitzer install codex-user --force' if this path is permanent.")
+    } else {
+      err("  Global Claude hooks would hard-code that path and break if it moves. Either:")
+      err("    - clone kibitz somewhere stable and run 'kibitzer install claude-user' from there, or")
+      err("    - use 'kibitzer install claude-project' here, or")
+      err("    - re-run with --force if you are sure this path is permanent.")
+    }
     return 1
   }
   // The hook command is a string the hook runner hands to a shell. Quoting
@@ -63,7 +71,7 @@ export function cmdInstall(scope = "project", force?: string): number {
     return 1
   }
 
-  const tmplPath = path.join(HOME, "install", "hooks.json")
+  const tmplPath = path.join(HOME, "install", templateFor(scope))
   const tmplRaw = read(tmplPath)
   if (tmplRaw === null) { err(`kibitzer: missing ${tmplPath}`); return 1 }
 
@@ -94,13 +102,16 @@ export function cmdInstall(scope = "project", force?: string): number {
     rm(tmp); err(`kibitzer: could not replace ${target}`); return 1
   }
   out(`kibitzer: hooks installed in ${target} (backup: ${target}.kibitz-backup)`)
-  out("  restart Claude Code — hooks are snapshotted at session start.")
+  if (scope === "codex-user") {
+    out("  Start Codex and approve normal hook trust for this file; do not bypass trust.")
+    out("  Then start a new Codex session before enabling the Codex host.")
+  } else out("  restart Claude Code — hooks are snapshotted at session start.")
   return 0
 }
 
 export function cmdUninstall(scope = "project"): number {
   const target = targetFor(scope)
-  if (!target) { err("usage: kibitzer uninstall [project|user]"); return 2 }
+  if (!target) { err("usage: kibitzer uninstall [claude-project|claude-user|codex-user]"); return 2 }
   if (!exists(target)) { out(`kibitzer: nothing at ${target}`); return 0 }
 
   let cur: any

@@ -7,76 +7,12 @@ import { createHash, randomUUID } from "node:crypto"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import {
-  ACTIVITY_LINES, BIN, CODEX_TIMEOUT, PROMPT_TMPL, SCHEMA, SENTINEL, TRANSCRIPT_LINES,
-  ageMinutes, append, appendSync, epochOf, exists, initSess, isEnabled, isMuted, isoNow,
-  listJson, read, rm, validSid, writeWorkerPid,
+  BIN, PROMPT_TMPL,
+  ageMinutes, append, appendSync, epochOf, initSess, isEnabled, isMuted, isoNow,
+  currentHost, listJson, read, rm, validSid, writeWorkerPid,
 } from "./core.ts"
-
-/** Read only the end of a file. A transcript grows for the whole session, so
- *  reading it whole and slicing afterwards makes every cycle scale with the
- *  session -- the bounded window would be honoured while the I/O was not. */
-function readTailLines(file: string, maxLines: number): string[] {
-  const fd = fs.openSync(file, "r")
-  try {
-    const size = fs.fstatSync(fd).size
-    const CHUNK = 1 << 16
-    const CAP = 1 << 26                            // 64 MB, for pathological records
-    // Collect chunks and join once. Concatenating inside the loop is quadratic
-    // in the bytes read, which a transcript with very few, very long lines hits
-    // hard -- the line cap alone does not bound the work.
-    const chunks: Buffer[] = []
-    let pos = size
-    let newlines = 0
-    let held = 0
-    while (pos > 0 && newlines <= maxLines && held < CAP) {
-      const len = Math.min(CHUNK, pos)
-      pos -= len
-      const b = Buffer.alloc(len)
-      fs.readSync(fd, b, 0, len, pos)
-      chunks.unshift(b)
-      held += len
-      for (const byte of b) if (byte === 10) newlines++
-    }
-    return Buffer.concat(chunks).toString("utf8").split("\n").filter(Boolean).slice(-maxLines)
-  } finally { try { fs.closeSync(fd) } catch {} }
-}
-
-/** Strip our own injected blocks so the advisor never critiques its own advice,
- *  and bound the read at the source: a transcript grows without limit, and
- *  slurping it whole costs the entire session on every cycle. */
-function transcriptTail(t: string): { activity: string; goal: string } {
-  if (!t || !exists(t)) return { activity: "(transcript unavailable)", goal: "(unknown)" }
-  let lines: string[]
-  try { lines = readTailLines(t, TRANSCRIPT_LINES) }
-  catch { return { activity: "(transcript unreadable)", goal: "(unknown)" } }
-
-  const acts: string[] = []
-  let goal = "(unknown)"
-  for (const line of lines) {
-    let e: any
-    try { e = JSON.parse(line) } catch { continue }
-    if (e?.isSidechain === true || !e?.message) continue
-    const content = e.message.content ?? []
-    const parts: string[] = []
-    for (const c of Array.isArray(content) ? content : [content]) {
-      if (typeof c === "string") parts.push(c)
-      else if (c?.type === "text") parts.push(c.text ?? "")
-      else if (c?.type === "tool_use")
-        parts.push(`→ ${c.name}: ${JSON.stringify(c.input ?? {}).slice(0, 200)}`)
-    }
-    const text = parts.join("\n")
-    if (text === "") continue
-    if (e.message.role === "user") {
-      const plain = (Array.isArray(content) ? content : [content])
-        .map((c: any) => (typeof c === "string" ? c : c?.type === "text" ? c.text ?? "" : ""))
-        .join(" ").trim()
-      if (plain !== "") goal = plain.slice(0, 800)
-    }
-    if (text.includes(SENTINEL)) continue          // our own prior advice
-    acts.push(`[${e.message.role}] ${text.slice(0, 600)}`)
-  }
-  return { activity: acts.slice(-40).join("\n\n").split("\n").slice(-ACTIVITY_LINES).join("\n"), goal }
-}
+import { adapterFor } from "./hosts.ts"
+import { invokeRunner, reserveCycle } from "./runners.ts"
 
 /** Digest the whole normalised note. Projecting onto [a-z0-9] collapses any
  *  note written entirely in non-Latin script to the empty string, making every
@@ -111,7 +47,8 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
   const startEpoch = admitted || epochOf(cwd)
   if (!isEnabled(cwd) || epochOf(cwd) !== startEpoch) return 0
 
-  const { activity, goal } = transcriptTail(transcript)
+  const adapter = adapterFor(currentHost())
+  const { activity, goal } = adapter.readContext(transcript)
   let diff: string
   const git = spawnSync("git", ["-C", cwd, "rev-parse", "--git-dir"], { stdio: "ignore" })
   if (git.status === 0) {
@@ -144,40 +81,30 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
     .split("__ACTIVITY__").join(activity)
     .split("__EVENTS__").join(events)
     .split("__DIFF__").join(diff)
+    .split("__HOST_AGENT__").join(currentHost() === "codex" ? "Codex" : "Claude Code")
+    .split("__SOURCE_BOUNDARY__").join(adapter.advisor === "claude"
+      ? "You can use only the material below. Do not claim independent repository verification."
+      : "Read the repository yourself. The summary above is a pointer, not a source — verify anything you intend to rely on.")
 
-  const outFile = path.join(d, "tmp", `codex-out.${process.pid}.json`)
+  const outFile = path.join(d, "tmp", `${adapter.advisor}-out.${process.pid}.json`)
   const logPath = path.join(d, "worker.log")
-  append(logPath, `--- cycle ${isoNow()} ---\n`)
-
-  // Fresh invocation every cycle. `codex exec resume` accepts neither --sandbox
-  // nor --cd, so it cannot hold the confinement boundary; the test suite
-  // captures the real invocation and fails if this regresses.
-  // Stream both channels straight to the log: a long Codex run should have live
-  // diagnostics, and buffering them in memory both hides progress and risks the
-  // runtime's synchronous-child output limit on a noisy run.
-  const logFd = fs.openSync(logPath, "a")
-  let r
-  try {
-    r = spawnSync("timeout", [String(CODEX_TIMEOUT), "codex", "exec",
-      "--sandbox", "read-only",
-      "--cd", cwd,
-      "--skip-git-repo-check",
-      "--output-schema", SCHEMA,
-      "-o", outFile,
-      "-"], { input: prompt, stdio: ["pipe", logFd, logFd] })
-  } finally { try { fs.closeSync(logFd) } catch {} }
-
-  const produced = read(outFile)
-  if (r.status !== 0 || !produced || produced.trim() === "") {
+  append(logPath, `--- ${adapter.advisor} cycle ${isoNow()} ---\n`)
+  if (!reserveCycle(d, currentHost())) {
+    try { fs.writeFileSync(path.join(d, "last-error"), `${isoNow()}  advisor budget exhausted\n`) } catch {}
+    append(logPath, "advisor budget exhausted\n")
+    return 0
+  }
+  const run = invokeRunner(currentHost(), cwd, prompt, outFile, logPath)
+  if (!run.ok) {
     // A failed cycle must never break the session, but it must not be invisible
     // either: record it where `kibitzer status` will show it.
     const tail = (read(logPath) ?? "").split("\n")
       .filter(l => /"message"|^ERROR/.test(l)).slice(-2).join("\n")
     try {
       fs.writeFileSync(path.join(d, "last-error"),
-        `${isoNow()}  codex exited ${r.status}${produced ? "" : " (no output)"}\n${tail}\n`)
+        `${isoNow()}  ${adapter.advisor} cycle failed: ${run.error ?? "no output"}\n${tail}\n`)
     } catch {}
-    append(logPath, `codex exited ${r.status}\n`)
+    append(logPath, `${adapter.advisor} cycle failed: ${run.error ?? "no output"}\n`)
     return 0
   }
   rm(path.join(d, "last-error"))
@@ -186,8 +113,7 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
   // captured before the call decides whether any of this is still wanted.
   if (!isEnabled(cwd) || epochOf(cwd) !== startEpoch) { rm(outFile); return 0 }
 
-  let advisories: any[] = []
-  try { advisories = JSON.parse(produced).advisories ?? [] } catch {}
+  const advisories = run.advisories
   const seenPath = path.join(d, "seen")
   const seen = new Set((read(seenPath) ?? "").split("\n").filter(Boolean))
   let n = 0
