@@ -193,13 +193,15 @@ session. Channels are a research preview and custom ones are not allowlisted, so
 flag:
 
 ```bash
-claude --dangerously-load-development-channels plugin:kibitz:kibitz
+claude --dangerously-load-development-channels server:plugin:kibitz:kibitz
 ```
 
-The identifier is the loaded plugin and MCP-server pair: `plugin:kibitz:kibitz`.
-The development-channel consent warning is expected; **“no MCP server configured
-with that name” is not**. If you see that message, the old `server:kibitz`
-identifier was used and the push channel is disabled.
+The flag uses `server:<name>`; this plugin's configured MCP-server name is
+`plugin:kibitz:kibitz`, so the full identifier is
+`server:plugin:kibitz:kibitz`. The development-channel consent warning is
+expected; **“no MCP server configured with that name” is not**. If you see that
+message, the old `server:kibitz` identifier was used and the push channel is
+disabled.
 
 It is a **second consumer of the same queue**, not a replacement. It takes the same atomic per-id
 claim, and that claim — not the ledger, which is a readable record and may fail to be written — is

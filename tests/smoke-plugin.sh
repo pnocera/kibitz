@@ -184,7 +184,7 @@ if [ "${SMOKE_CHANNEL:-0}" = "1" ]; then
   # nothing, and would fail even when loading works correctly.
   ( cd "$PROJ" && CLAUDE_CONFIG_DIR="$CFG" ADVISOR_STATE_ROOT="$STATE" \
       timeout 180 claude -p "Run this bash command: sleep 40" \
-      --dangerously-load-development-channels "plugin:kibitz:kibitz" \
+      --dangerously-load-development-channels "server:plugin:kibitz:kibitz" \
       --permission-mode bypassPermissions >"$PROJ/chan.txt" 2>&1 ) &
   CLAUDE_PID=$!
   NEWSID=""
