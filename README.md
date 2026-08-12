@@ -189,19 +189,24 @@ By default an advisory waits for your next tool call. That is seconds during act
 advisory produced while the session sits idle waits until you do something.
 
 kibitz also ships a Claude Code **channel** — an MCP server that pushes advisories into the running
-session. Channels are a research preview and custom ones are not allowlisted, so it needs a launch
-flag:
+session. A skills-directory plugin is loaded for MCP but is not a channel-installable marketplace
+plugin, so register this channel once as a named user MCP server:
 
 ```bash
-claude --dangerously-load-development-channels plugin:kibitz@skills-dir
+claude mcp add --scope user kibitz-channel -- \
+  ~/.claude/skills/kibitz/bin/kibitzer channel
 ```
 
-The flag takes the plugin identity, which `npx skills` registers as
-`kibitz@skills-dir`. The MCP-server identity shown in `/mcp`
-(`plugin:kibitz:kibitz`) is not a channel-flag argument. The development-channel
-consent warning is expected; **“no MCP server configured with that name” is
-not**. If you see it, a `server:` identifier was used and the push channel is
-disabled.
+Then restart Claude with the named development channel:
+
+```bash
+claude --dangerously-load-development-channels server:kibitz-channel
+```
+
+Accept the development-channel confirmation. `/mcp` should show
+`kibitz-channel` connected. Do not pass `plugin:kibitz@skills-dir` or either
+`plugin:kibitz:kibitz` form to the channel flag: those identify the skills-dir
+plugin/MCP server but are not an installed channel plugin.
 
 It is a **second consumer of the same queue**, not a replacement. It takes the same atomic per-id
 claim, and that claim — not the ledger, which is a readable record and may fail to be written — is
