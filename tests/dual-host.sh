@@ -107,13 +107,16 @@ check "doctor reports Claude runner dependencies" 'grep -F "claude" "$TMP/doctor
 
 LEAN="$TMP/lean-bin"
 mkdir -p "$LEAN"
-# `codex` is deliberately absent from this minimal PATH: doctor must regard the
-# unregistered Codex direction as optional. It is available to local developers
-# but not on the GitHub runner, so only link commands that actually exist.
-for tool in bun codex flock setsid timeout tail find; do
+# The fixture needs Codex for the Claude direction, while leaving Claude and
+# bwrap absent to test that the unregistered Codex direction is optional. The
+# GitHub runner has no Codex CLI, so make that dependency explicit as a fake
+# rather than inheriting a developer-machine executable.
+for tool in bun flock setsid timeout tail find; do
   tool_path="$(command -v "$tool" || true)"
   [ -z "$tool_path" ] || ln -s "$tool_path" "$LEAN/$tool"
 done
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$LEAN/codex"
+chmod +x "$LEAN/codex"
 DOCTOR_HOME="$TMP/doctor-home"
 DOCTOR_CODEX="$TMP/doctor-codex"
 DOCTOR_CLAUDE="$TMP/doctor-claude"
