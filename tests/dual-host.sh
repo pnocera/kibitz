@@ -52,7 +52,7 @@ mkdir -p "$codex_session/outbox"
 epoch="$(cut -d' ' -f2 "$codex_project/state")"
 jq -cn --argjson epoch "$epoch" '{id:"codex-advice",epoch:$epoch,note:"Claude advice",kind:"",why_it_matters:"",evidence:""}' >"$codex_session/outbox/one.json"
 out="$(payload | "$ADV" hook --host codex PreToolUse)"
-check "Codex host labels delivery as Claude advice" 'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep -q "Advisory from Claude"'
+check "Codex host labels delivery as Claude advice" 'printf "%s" "$out" | jq -r ".hookSpecificOutput.additionalContext" | grep -q "UNTRUSTED ADVISORY from Claude"'
 check "Codex host returns Codex hook output" '[ "$(printf "%s" "$out" | jq -r ".hookSpecificOutput.hookEventName")" = PreToolUse ]'
 
 mkdir -p "$CODEX_HOME"
@@ -107,7 +107,13 @@ check "doctor reports Claude runner dependencies" 'grep -F "claude" "$TMP/doctor
 
 LEAN="$TMP/lean-bin"
 mkdir -p "$LEAN"
-for tool in bun codex flock setsid timeout tail find; do ln -s "$(command -v "$tool")" "$LEAN/$tool"; done
+# `codex` is deliberately absent from this minimal PATH: doctor must regard the
+# unregistered Codex direction as optional. It is available to local developers
+# but not on the GitHub runner, so only link commands that actually exist.
+for tool in bun codex flock setsid timeout tail find; do
+  tool_path="$(command -v "$tool" || true)"
+  [ -z "$tool_path" ] || ln -s "$tool_path" "$LEAN/$tool"
+done
 DOCTOR_HOME="$TMP/doctor-home"
 DOCTOR_CODEX="$TMP/doctor-codex"
 DOCTOR_CLAUDE="$TMP/doctor-claude"
