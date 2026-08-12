@@ -1647,8 +1647,22 @@ check "stats separates volume from distinct issues and outcomes" \
 
 check "the operator log carries the id the mark command takes" \
   'grep >/dev/null "$FIRST" "$(sdir)/advice.log"'
-# Captured before the mute case below resets this direction's register.
+# Captured before the cases below add to, and then reset, this direction's register.
 CLAUDE_ISSUES="$(wc -l <"$(sdir)/issues.jsonl")"
+
+# Containment divides by the smaller token set, so a three-word note scores 1.0
+# against any longer note that happens to contain those three words. With no
+# citation there is nothing else to check the claim against, so the floor has to
+# guard the uncited branch too: it is the branch with no second opinion.
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+idfake "The cache is not invalidated when the registration changes, so a stale entry survives an upgrade and the channel keeps using it." \
+       "Stale state outlives the change that should have cleared it." ""
+idrun
+find "$(sdir)/outbox" -name '*.json' -delete 2>/dev/null
+idfake "cache not invalidated" "b" ""
+idrun
+check "a short uncited claim is not swallowed by a longer one that contains its words" \
+  '[ "$(published)" -eq 1 ]' "published $(published)"
 
 # mute now matches the evidence too, so a whole file can be muted by path.
 "$ADV" mute "subject.ts" "$WORK" >/dev/null

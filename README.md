@@ -142,9 +142,17 @@ plus the files its `evidence` cites, and a restatement is a repeat only while th
 what they said. Change the code and the concern is raised again — that is new evidence, not noise.
 Held-back repeats are counted, not hidden; `kibitzer stats` reports them.
 
-Two things this cannot infer. It cannot tell a genuinely new claim from a reworded one when the
-advisor cites nothing, so an advisory with no `evidence` is only ever suppressed on near-identical
-prose. And it cannot know you considered something and disagreed. That is what `mark` is for:
+One exception, deliberate: **the same sentence again** — identical once case and spacing are
+normalised — is dropped outright and does not get that reprieve. It is the only check that works on a note the tokeniser cannot segment — a note written
+entirely in Japanese or Cyrillic yields no tokens at all — and an unchanged sentence returning on an
+unrelated edit is the repetition this exists to stop. This check runs before the citation is even
+read, so changing the code does not bring that exact sentence back. Only a rewording does, and then
+the freshness rule above governs it.
+
+Two further things this cannot infer. It cannot tell a genuinely new claim from a reworded one when
+the advisor cites nothing, so an advisory with no `evidence` is only ever suppressed on
+near-identical prose, and never when either side is too short to be sure of. And it cannot know you
+considered something and disagreed. That is what `mark` is for:
 
 ```bash
 kibitzer mark 4f2a1c declined

@@ -132,9 +132,10 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
     const kind = a?.kind ?? ""
     const evidence = a?.evidence ?? ""
     if (isMuted(cwd, `${kind} ${note} ${evidence}`)) continue
-    // Byte-identical text is suppressed outright, and deliberately does not get
-    // the freshness reprieve the register gives a paraphrase. This is the only
-    // check that works on a note the tokeniser cannot segment -- a note written
+    // The same sentence again -- identical once case and spacing are normalised --
+    // is suppressed outright, and deliberately does not get the freshness reprieve
+    // the register gives a paraphrase. This is the only check that works on a
+    // note the tokeniser cannot segment -- a note written
     // entirely in Japanese or Cyrillic yields no tokens at all -- and letting an
     // unchanged sentence through on an unrelated edit would reopen the
     // repetition this exists to stop.

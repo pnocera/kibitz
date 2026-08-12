@@ -554,8 +554,15 @@ export function repeatedIssue(
 ): Issue | null {
   for (const issue of issues) {
     // No shortcut for identical wording: the freshness rule below governs every
-    // case, or the documented policy is not the policy. Byte-identical repeats
-    // never reach here anyway -- `seen` catches those before this is asked.
+    // case, or the documented policy is not the policy. A repeat of the same
+    // normalised sentence never reaches here -- `seen` catches it beforehand.
+    // Containment divides by the smaller set, so a terse advisory whose handful
+    // of words all appear inside a long one scores 1.0 against it. Below this
+    // many distinctive words there is not enough of a claim to be sure it is the
+    // same claim, and a false suppression is silent. Ahead of both branches: the
+    // uncited branch has a higher bar but the same arithmetic, so a three-word
+    // note would clear 0.8 against any longer note that happens to contain it.
+    if (Math.min(cand.tokens.size, issue.tokens.length) < 8) continue
     const sim = containment(cand.tokens, new Set(issue.tokens))
     const shared = issue.paths.filter(p => cand.paths.includes(p))
     if (shared.length === 0) {
@@ -564,11 +571,6 @@ export function repeatedIssue(
       if (cand.paths.length === 0 && issue.paths.length === 0 && sim >= 0.8) return issue
       continue
     }
-    // Containment divides by the smaller set, so a terse advisory whose handful
-    // of words happen to appear inside a long one scores 1.0 against it. Below
-    // this many distinctive words there is not enough of a claim to be sure it
-    // is the same claim, and a false suppression is silent.
-    if (Math.min(cand.tokens.size, issue.tokens.length) < 8) continue
     if (sim < REPEAT_SIMILARITY) continue
     // Declined once is declined: re-raising it on the next unrelated edit to the
     // same file is the re-litigation this exists to stop. Anything else gets
