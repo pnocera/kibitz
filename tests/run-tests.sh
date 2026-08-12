@@ -1112,6 +1112,15 @@ set -eu
 action="${2:-}"; shift 2
 [ "${1:-}" = --scope ] && shift 2
 name="${1:-}"; shift
+# Claude spells stdio environment variables as repeated `-e KEY=value` AFTER the
+# server name -- the option is variadic, so a leading one eats the name and the
+# real CLI rejects the command. Parse the shape the real one accepts, or this
+# stand-in green-lights an ordering that cannot work.
+envjson='{}'
+while [ "${1:-}" = "-e" ]; do
+  kv="${2:-}"; shift 2
+  envjson="$(printf '%s' "$envjson" | jq -c --arg k "${kv%%=*}" --arg v "${kv#*=}" '.[$k]=$v')"
+done
 cfg="${CLAUDE_CONFIG_DIR:?}/.claude.json"
 mkdir -p "$(dirname "$cfg")"
 [ -f "$cfg" ] || printf '{}\n' >"$cfg"
@@ -1142,8 +1151,8 @@ case "$action" in
     [ "${1:-}" = -- ] && shift
     bin="${1:-}"; arg="${2:-}"
     tmp="$cfg.fake.$$"
-    jq --arg n "$name" --arg b "$bin" --arg a "$arg" \
-      '.mcpServers //= {} | .mcpServers[$n] = {type:"stdio", command:$b, args:[$a], env:{}}' "$cfg" >"$tmp"
+    jq --arg n "$name" --arg b "$bin" --arg a "$arg" --argjson e "$envjson" \
+      '.mcpServers //= {} | .mcpServers[$n] = {type:"stdio", command:$b, args:[$a], env:$e}' "$cfg" >"$tmp"
     mv "$tmp" "$cfg"
     ;;
   remove)
@@ -1235,8 +1244,45 @@ check "a silent no-op add is a failure, not a registration" \
   '[ "$CHRC" -ne 0 ] && ! grep >/dev/null "restored the previous" "$WORK/chan-noop.out"' \
   "$(cat "$WORK/chan-noop.out")"
 check "and the operator is given the command that puts the entry back" \
-  'grep >/dev/null "claude mcp add --scope user kibitz-channel -- $AGENTSKILL/bin/kibitzer channel" \
+  'grep >/dev/null "claude mcp add --scope user kibitz-channel -- '\''$AGENTSKILL/bin/kibitzer'\'' '\''channel'\''" \
      "$WORK/chan-noop.out"' "$(cat "$WORK/chan-noop.out")"
+
+# That line is written to be pasted into a shell, and its words come from a
+# config we do not control.
+jq -n --arg b "$CHROOT/od d/bin/kibitzer" \
+  '{mcpServers:{"kibitz-channel":{type:"stdio",command:$b,args:["channel"]}}}' >"$CHCFG/.claude.json"
+: >"$CHROOT/claude.log"
+eval "$CHENV KIBITZ_FAKE_CLAUDE_NOOP=add \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user --replace-channel" \
+  >"$WORK/chan-quote.out" 2>&1
+check "a path with a space comes back quoted, not as two words" \
+  'grep >/dev/null "'\''$CHROOT/od d/bin/kibitzer'\''" "$WORK/chan-quote.out"' \
+  "$(cat "$WORK/chan-quote.out")"
+
+# env is the one field beyond command and args that Claude's writer can set, so
+# restoration must carry it rather than report it lost.
+jq -n --arg b "$AGENTSKILL/bin/kibitzer" \
+  '{mcpServers:{"kibitz-channel":{type:"stdio",command:$b,args:["channel"],env:{KIBITZ_SESSION:"s1"}}}}' \
+  >"$CHCFG/.claude.json"
+rm -f "$CHROOT/claude.log.failed"; : >"$CHROOT/claude.log"
+eval "$CHENV KIBITZ_FAKE_CLAUDE_FAIL=add \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" \
+  >"$WORK/chan-env.out" 2>&1
+check "a restored record keeps the env the previous one carried" \
+  '[ "$(jq -r '\''.mcpServers["kibitz-channel"].env.KIBITZ_SESSION'\'' "$CHCFG/.claude.json")" = s1 ]' \
+  "$(cat "$WORK/chan-env.out")"
+check "and that counts as a full restore, not a partial one" \
+  'grep >/dev/null "restored the previous" "$WORK/chan-env.out"' "$(cat "$WORK/chan-env.out")"
+
+# A flag value comes back a string, so a number or a boolean cannot be restored
+# as it was. Reporting that as restored would be the false all-clear again.
+jq -n --arg b "$AGENTSKILL/bin/kibitzer" \
+  '{mcpServers:{"kibitz-channel":{type:"stdio",command:$b,args:["channel"],env:{PORT:1}}}}' \
+  >"$CHCFG/.claude.json"
+rm -f "$CHROOT/claude.log.failed"; : >"$CHROOT/claude.log"
+eval "$CHENV KIBITZ_FAKE_CLAUDE_FAIL=add \"$AGENTSKILL/bin/kibitzer\" install claude-channel-user" \
+  >"$WORK/chan-env2.out" 2>&1
+check "an env value the writer cannot reproduce is reported, not called restored" \
+  '! grep >/dev/null "restored the previous" "$WORK/chan-env2.out" &&
+   grep >/dev/null "not in full" "$WORK/chan-env2.out"' "$(cat "$WORK/chan-env2.out")"
 
 # The name being occupied afterwards is not the record being back either: a
 # concurrent writer can take it, and "restored" must never be said on that.

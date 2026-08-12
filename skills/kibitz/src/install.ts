@@ -46,7 +46,7 @@ function stripOurs(entries: HookEntry[]): HookEntry[] {
     .filter(e => (e.hooks ?? []).length > 0)
 }
 
-interface ChannelServer { type?: unknown; command?: unknown; args?: unknown }
+interface ChannelServer { type?: unknown; command?: unknown; args?: unknown; env?: unknown }
 
 /** Recognise a channel we can safely replace. Realpath covers npx skills'
  * Claude-to-agents symlink; the path suffix lets uninstall repair a record
@@ -76,27 +76,48 @@ function isOurChannel(entry: unknown): boolean {
  * commands with no transaction around them, so without this a transient CLI or
  * config failure between them turns an upgrade into an outage: the operator is
  * left with no channel at all, which is worse than the state they started in. */
-function restoreChannel(prev: ChannelServer): boolean {
-  if (typeof prev.command !== "string") return false
+function restoreChannel(prev: ChannelServer): "restored" | "partial" | "failed" {
+  if (typeof prev.command !== "string") return "failed"
   const args = Array.isArray(prev.args) ? prev.args.map(String) : []
-  if (!runClaudeMcp(["add", "--scope", "user", CHANNEL_NAME, "--", prev.command, ...args])) return false
+  const env = envArgsOf(prev)
+  // After the name, never before it: -e is variadic, so a leading one swallows
+  // the positional server name and the CLI rejects the whole command.
+  const flags = env.pairs.flatMap(p => ["-e", p])
+  if (!runClaudeMcp(["add", "--scope", "user", CHANNEL_NAME, ...flags, "--", prev.command, ...args]))
+    return "failed"
   // A zero exit is not the record being back, and neither is the name merely
   // being occupied: a concurrent write could hold it. Claim a restore only when
   // the config shows the entry we removed, or the operator is told their channel
   // is safe when it is gone.
   const back = readChannelEntry()
   const got = back?.entry as ChannelServer | undefined
-  if (!back || !back.exists || got?.command !== prev.command) return false
-  if (JSON.stringify(got?.args ?? null) !== JSON.stringify(prev.args ?? null)) return false
-  // Restoration goes through the same writer as registration, which takes a
-  // command and arguments. Anything else the record carried is not reproduced,
-  // so report it rather than let "restored" imply more than was done.
-  const extra = Object.keys(prev).filter(k => k !== "type" && k !== "command" && k !== "args")
-  if (extra.length > 0) {
-    err(`kibitzer: the restored ${CHANNEL_NAME} record does not carry its previous ${extra.join(", ")}.`)
-    err(`  The entry it had was: ${JSON.stringify(prev)}`)
+  if (!back || !back.exists || got?.command !== prev.command) return "failed"
+  if (JSON.stringify(got?.args ?? null) !== JSON.stringify(prev.args ?? null)) return "failed"
+  // Sent is not stored. A writer that drops or rewrites an environment entry
+  // would otherwise produce the same false all-clear as one that wrote nothing.
+  const gotEnv = got?.env && typeof got.env === "object" && !Array.isArray(got.env)
+    ? got.env as Record<string, unknown> : {}
+  for (const pair of env.pairs) {
+    const at = pair.indexOf("=")
+    if (gotEnv[pair.slice(0, at)] !== pair.slice(at + 1)) return "failed"
   }
-  return true
+  // Restoration goes through the same writer as registration, which takes a
+  // command and arguments. Anything else the record carried is gone, and a
+  // server that needed it is registered but broken -- so that is not a restore
+  // and must not be reported as one. An empty value carried nothing to lose.
+  const lost = Object.entries(prev)
+    .filter(([k]) => k !== "type" && k !== "command" && k !== "args")
+    .filter(([k]) => !(k === "env" && env.complete))
+    .filter(([, v]) => !(v === undefined || v === null ||
+      (typeof v === "object" && !Array.isArray(v) && Object.keys(v as object).length === 0)))
+    .map(([k]) => k)
+  if (lost.length > 0) {
+    err(`kibitzer: the ${CHANNEL_NAME} command and arguments are back, but not its ${lost.join(", ")}.`)
+    err("  Claude's writer cannot set those, so the server may not work as it did.")
+    err(`  The entry it had was: ${JSON.stringify(prev)}`)
+    return "partial"
+  }
+  return "restored"
 }
 
 /** An upgrade adds and overwrites files; it does not delete one the new version
@@ -105,9 +126,9 @@ function restoreChannel(prev: ChannelServer): boolean {
  * Claude never loads that one as a channel, so it claims advisories, marks them
  * delivered and drops them silently -- the failure this registration exists to
  * avoid. Remove our own stale file; report anything else rather than touch it. */
-function clearStalePluginChannel(): void {
+function clearStalePluginChannel(): boolean {
   const stale = path.join(HOME, ".mcp.json")
-  if (!exists(stale)) return
+  if (!exists(stale)) return true
   let config: any
   try { config = JSON.parse(read(stale) ?? "") } catch { config = null }
   const servers = config?.mcpServers
@@ -126,7 +147,7 @@ function clearStalePluginChannel(): void {
   if (!ours) {
     err(`kibitzer: ${stale} is not the superseded plugin channel; leaving it in place`)
     err("  If it starts a second 'kibitzer channel', advisories it claims are lost.")
-    return
+    return true
   }
   rm(stale)
   // rm swallows its errors. A read-only install or a permissions failure would
@@ -135,10 +156,11 @@ function clearStalePluginChannel(): void {
     err(`kibitzer: could not remove ${stale}`)
     err("  It starts a second 'kibitzer channel' that claims advisories and drops them.")
     err("  Delete it by hand before relying on the channel.")
-    return
+    return false
   }
   out(`kibitzer: removed the superseded plugin channel at ${stale}`)
   out("  It would have raced this registration for the same queue.")
+  return true
 }
 
 function readChannelEntry(): { exists: boolean; entry: unknown } | null {
@@ -168,19 +190,58 @@ function runClaudeMcp(args: string[]): boolean {
   return false
 }
 
+const shellQuote = (s: string) => `'${s.split("'").join(`'\\''`)}'`
+
+/** Claude's writer takes stdio environment variables as `-e KEY=value`, so a
+ *  record carrying them can be put back as it was. Strings only: a flag value
+ *  comes back a string, so restoring a number or a boolean would change the
+ *  record while reporting it unchanged. Those count as not reproduced. */
+function envArgsOf(prev: ChannelServer): { pairs: string[]; complete: boolean } {
+  const env = (prev as { env?: unknown }).env
+  if (env === undefined || env === null) return { pairs: [], complete: true }
+  if (typeof env !== "object" || Array.isArray(env)) return { pairs: [], complete: false }
+  const entries = Object.entries(env as Record<string, unknown>)
+  const usable = entries.filter(([, v]) => typeof v === "string")
+  return {
+    pairs: usable.map(([k, v]) => `${k}=${String(v)}`),
+    complete: usable.length === entries.length,
+  }
+}
+
 /** What to run to undo what we could not. --replace-channel accepts a record we
  * did not write, and Claude's writer takes a command and arguments -- an HTTP or
  * SSE server has no such line, so print the record rather than a command that
  * would name an undefined executable. */
 function recoveryHint(prev: ChannelServer): void {
   if (typeof prev.command === "string") {
-    const args = Array.isArray(prev.args) ? prev.args.map(String).join(" ") : ""
+    // Quoted, because this line is written to be pasted into a shell and the
+    // values come from a config we do not control: a space makes it wrong, and a
+    // metacharacter makes a diagnostic into something else entirely.
+    const words = [prev.command, ...(Array.isArray(prev.args) ? prev.args.map(String) : [])]
+    const env = envArgsOf(prev)
+    const flags = env.pairs.map(p => ` -e ${shellQuote(p)}`).join("")
     err("  Register it again by hand:")
-    err(`    claude mcp add --scope user ${CHANNEL_NAME} -- ${prev.command} ${args}`.trimEnd())
+    err(`    claude mcp add --scope user ${CHANNEL_NAME}${flags} -- ${words.map(shellQuote).join(" ")}`)
+    if (!env.complete) err(`  Its env could not be expressed as flags; it was: ${JSON.stringify(prev.env ?? null)}`)
     return
   }
   err("  It was not a stdio command, so there is no add line to repeat. It was:")
   err(`    ${JSON.stringify(prev)}`)
+}
+
+/** Say exactly what came back. "restored" must mean the record is as it was;
+ *  anything less is named, so the operator knows what is left to do. */
+function reportRestore(prev: ChannelServer, result: "restored" | "partial" | "failed"): void {
+  if (result === "restored") {
+    err(`kibitzer: restored the previous ${CHANNEL_NAME} registration`)
+    return
+  }
+  if (result === "partial") {
+    err(`kibitzer: the previous ${CHANNEL_NAME} registration is back, but not in full.`)
+    return
+  }
+  err(`kibitzer: the previous ${CHANNEL_NAME} registration could not be restored either.`)
+  recoveryHint(prev)
 }
 
 function channelUsage(): number {
@@ -211,14 +272,18 @@ function cmdInstallClaudeChannel(options: string[]): number {
   // Claude mcp add deliberately rejects duplicate names. Removing first is
   // safe only after the exact ownership gate above (or an explicit override).
   const prev = current.exists ? current.entry as ChannelServer : null
-  if (prev && !runClaudeMcp(["remove", "--scope", "user", CHANNEL_NAME])) return 1
-  if (!runClaudeMcp(["add", "--scope", "user", CHANNEL_NAME, "--", BIN, "channel"])) {
-    if (prev && !restoreChannel(prev)) {
-      err(`kibitzer: the previous ${CHANNEL_NAME} registration could not be restored either.`)
-      recoveryHint(prev)
-    } else if (prev) {
-      err(`kibitzer: restored the previous ${CHANNEL_NAME} registration`)
+  if (prev && !runClaudeMcp(["remove", "--scope", "user", CHANNEL_NAME])) {
+    // A reported failure is not proof nothing changed: Claude may have written
+    // the config and then failed. Check before assuming the record survived.
+    const after = readChannelEntry()
+    if (after && !after.exists) {
+      err(`kibitzer: the ${CHANNEL_NAME} registration is gone even though the removal failed.`)
+      reportRestore(prev, restoreChannel(prev))
     }
+    return 1
+  }
+  if (!runClaudeMcp(["add", "--scope", "user", CHANNEL_NAME, "--", BIN, "channel"])) {
+    if (prev) reportRestore(prev, restoreChannel(prev))
     return 1
   }
   const next = readChannelEntry()
@@ -228,9 +293,8 @@ function cmdInstallClaudeChannel(options: string[]): number {
     // treat it the same -- but only when the name is verifiably free. If
     // something else now holds it, that is a concurrent write, and overwriting
     // it would be the takeover this command refuses to do unasked.
-    if (prev && next && !next.exists && restoreChannel(prev)) {
-      err(`kibitzer: restored the previous ${CHANNEL_NAME} registration`)
-    } else if (prev) {
+    if (prev && next && !next.exists) reportRestore(prev, restoreChannel(prev))
+    else if (prev) {
       err("  The previous registration was removed.")
       recoveryHint(prev)
     }
@@ -239,10 +303,12 @@ function cmdInstallClaudeChannel(options: string[]): number {
   // Only now: until this point the superseded plugin file is still the delivery
   // path, and removing it before the replacement is confirmed would leave a
   // failed install with no consumer at all.
-  clearStalePluginChannel()
+  const cleaned = clearStalePluginChannel()
   out(`kibitzer: Claude channel registered in ${channelConfigPath()} (via Claude Code)`)
   out(`  Restart Claude with: claude --dangerously-load-development-channels server:${CHANNEL_NAME}`)
-  return 0
+  // Registered, but the duplicate consumer this registration exists to replace
+  // is still there. Exiting 0 would tell a script the race is fixed.
+  return cleaned ? 0 : 1
 }
 
 function cmdUninstallClaudeChannel(options: string[]): number {
