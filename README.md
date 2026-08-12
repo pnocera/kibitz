@@ -27,17 +27,17 @@ Restart Claude Code, then ask it to opt in for the current directory:
 > run `kibitzer on`
 
 Claude Code ships hooks through its plugin. Codex needs one more activation step after its skill is
-installed: run `kibitzer install codex-user`, approve Codex's normal hook-trust prompt, and start
-a new Codex session. Do not use a trust-bypass flag. Registration rewrites `hooks.json` after
-creating a `.kibitz-backup`; existing Codex hooks can require re-approval. The skills installer
-makes a skill visible; it does not itself activate Codex hooks.
+installed: run `~/.agents/skills/kibitz/bin/kibitzer install codex-user`, approve Codex's normal
+hook-trust prompt, and start a new Codex session. Do not use a trust-bypass flag. Registration
+rewrites `hooks.json` after creating a `.kibitz-backup`; existing Codex hooks can require
+re-approval. The skills installer makes a skill visible; it does not itself activate Codex hooks.
 
-Note that `kibitzer` is on **Claude Code's Bash tool** `PATH`, not your shell's — that is what plugins
-expose. Asking Claude to run it works; typing it in your own terminal will not, unless you use the
-full path or run `kibitzer link`:
+Claude Code exposes the plugin's `bin/` directory on its Bash-tool `PATH`, so its agents can run
+`kibitzer`. In a terminal or another host, use the installed path or run its `link` command once
+to make a shell command:
 
 ```bash
-~/.claude/skills/kibitz/bin/kibitzer on     # or: ... link, for a ~/.local/bin shim
+~/.claude/skills/kibitz/bin/kibitzer link   # creates ~/.local/bin/kibitzer
 ```
 
 Named kibitz because Claude Code already has a built-in `/advisor`, and shadowing it is a bad idea.
@@ -75,27 +75,36 @@ a `bin/kibitz` that no longer exists and are no longer recognised as ours. Delet
 entries by hand — the ones whose command contains `/bin/kibitz hook` — then run `kibitzer install`.
 Do not clear the whole `hooks` block: it holds your other hooks too.
 `kibitzer install user` targets `~/.claude/settings.json` but refuses to run from a project-local or
-temporary checkout, since it bakes an absolute path into your global config. `kibitzer link` puts the
-command on your `PATH`. None of this is needed for a plugin install.
+temporary checkout, since it bakes an absolute path into your global config. The installed
+`.../bin/kibitzer link` command puts the command on your `PATH`. None of this is needed for a plugin
+install.
 
 </details>
 
 ## Use
 
+In Claude Code, the plugin exposes `kibitzer` on the Bash-tool `PATH`; the
+commands below use that form. Codex uses the installed path stated immediately
+after the block.
+
 ```
-kibitzer on | off [--host H]      opt in / out for this directory
-kibitzer quiet on | off [--host H] keep analysing and logging, stop injecting
-kibitzer status [--host H]        what is enabled, pending, running
-kibitzer log [cwd] [n]            what has been said
-kibitzer tail [cwd]               follow it live
-kibitzer pane [cwd]               Herdr side pane following the log
-kibitzer statusline [cwd]         pending-count segment for your status line
-kibitzer advise-now [cwd]         ask for a contribution now, without waiting
-kibitzer mute <text>|list|clear   stop hearing about a topic
-kibitzer stats [cwd]              what kinds of things it has been saying
-kibitzer lint <file>              fail if a file reads like a review gate
-kibitzer install codex-user       register user-scoped Codex hooks
+kibitzer on | off [cwd] [--host H]       opt in / out for this directory
+kibitzer quiet on | off [--host H]       keep analysing and logging, stop injecting
+kibitzer status [cwd] [--host H]         what is enabled, pending, running
+kibitzer log [cwd] [n]                   what has been said
+kibitzer tail [cwd]                      follow it live
+kibitzer pane [cwd]                      Herdr side pane following the log
+kibitzer statusline [cwd]                pending-count segment for your status line
+kibitzer advise-now [cwd]                ask for a contribution now, without waiting
+kibitzer mute <text>|list|clear          stop hearing about a topic
+kibitzer stats [cwd]                     what kinds of things it has been saying
+kibitzer lint <file>                     fail if a file reads like a review gate
+kibitzer install codex-user              register user-scoped Codex hooks
 ```
+
+These are the Claude Code commands. In Codex, invoke the equivalent installed executable at
+`~/.agents/skills/kibitz/bin/kibitzer`; after running its `link` command once, `kibitzer` is also
+available from `~/.local/bin`.
 
 Use `--host claude` or `--host codex` for one direction. Controls (`on`, `off`, `quiet`, and
 `status`) without a host selector act on both installed hosts. Session-specific commands (`log`,
@@ -184,22 +193,13 @@ session. Channels are a research preview and custom ones are not allowlisted, so
 flag:
 
 ```bash
-claude --dangerously-load-development-channels server:kibitz
+claude --dangerously-load-development-channels plugin:kibitz:kibitz
 ```
 
-That flag prints a **WARNING: Loading development channels** banner naming `server:kibitz`. This is
-expected and is not an error — it is the consent notice for the flag, and the channel loads.
-
-Do not try to avoid the banner by dropping the flag and passing `--channels server:kibitz`. A
-`server:` entry always requires the development flag, and without it the entry is **skipped
-silently**: Claude starts with no channel and tells you nothing. You lose the push and are not
-warned.
-
-`--channels` takes only `plugin:<name>@<marketplace>` entries, against an allowlist that is either
-Anthropic's own or `allowedChannelPlugins` in **managed** settings. On an ordinary workstation
-kibitz is on neither, so the flag above is the way to run it. An administrator who allowlists
-`plugin:kibitz@<marketplace>` in managed settings can run it through `--channels` without the
-banner; that route is untested here.
+The identifier is the loaded plugin and MCP-server pair: `plugin:kibitz:kibitz`.
+The development-channel consent warning is expected; **“no MCP server configured
+with that name” is not**. If you see that message, the old `server:kibitz`
+identifier was used and the push channel is disabled.
 
 It is a **second consumer of the same queue**, not a replacement. It takes the same atomic per-id
 claim, and that claim — not the ledger, which is a readable record and may fail to be written — is
@@ -233,14 +233,17 @@ delivery, the channel's MCP handshake and its parity with the hook drain, and ho
 queues an advisory and checks a real Claude launched with the development-channel flag actually
 claims it — the unit tests can prove the queue logic and the `.mcp.json` shape, but not that Claude
 discovers and launches the channel. The base phase: it installs into the real layout, starts a headless
-Claude Code, and asserts a hook actually fired. It needs an authenticated CLI and a couple of
+Claude Code, and asserts a hook actually fired. It uses an owner-only temporary copy of the local
+Claude credentials file (or `KIBITZ_CLAUDE_CREDENTIALS_JSON`) for its disposable config. A token
+refresh can require logging in again afterwards. It needs an authenticated CLI and a couple of
 minutes, so CI cannot run it — but the JSON-shape tests never cross the loader boundary, and this
 package has already shipped one install that validated perfectly and loaded nothing.
 
 `bash tests/smoke-npx-skills.sh` checks the published combined `npx skills` command in a clean
 home and verifies both installed layouts plus Codex hook registration. `--live` adds the two host
-loader checks; the Codex half is interactive and uses an owner-only temporary copy of the existing
-local Codex login because it needs a disposable `CODEX_HOME` for normal hook-trust approval.
+loader checks; the Codex half needs an interactive terminal and uses an owner-only temporary copy
+of the existing local Codex login because it needs a disposable `CODEX_HOME` for normal hook-trust
+approval. A token refresh in either disposable login can require signing in again afterwards.
 
 Run `bash tests/dual-host.sh` with the legacy suite after changing host selection, Codex hooks,
 state roots, or runner boundaries. CI runs both suites.

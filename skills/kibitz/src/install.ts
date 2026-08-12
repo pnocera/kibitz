@@ -137,8 +137,8 @@ export function cmdUninstall(scope = "project"): number {
   return 0
 }
 
-/** Installed as a plugin, bin/ is on Claude Code's Bash-tool PATH -- but not on
- *  the operator's own shell PATH, and a plain skill install gets neither. */
+/** Claude Code exposes a plugin bin/ on its Bash-tool PATH. Link the installed
+ *  executable when an operator or another host needs a shell command. */
 export function cmdLink(dir = path.join(os.homedir(), ".local", "bin"), force?: string): number {
   try { fs.mkdirSync(dir, { recursive: true }) } catch { err(`kibitzer: cannot create ${dir}`); return 1 }
   const dest = path.join(dir, "kibitzer")

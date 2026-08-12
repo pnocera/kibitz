@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Crosses the Claude Code loader boundary, which run-tests.sh deliberately does
-# not: it installs into the exact layout `npx skills add pnocera/kibitz -g -a claude-code`
+# not: it installs into the exact layout `npx skills add pnocera/kibitz -g -a claude-code codex`
 # produces, starts a real headless session, and asserts a hook actually fired.
 #
-# Not part of the default suite: it needs an authenticated Claude Code and takes
-# a couple of minutes, so CI cannot run it. Run it by hand after touching the
+# Not part of the default suite: it needs an authenticated Claude Code with a
+# readable credentials file (or KIBITZ_CLAUDE_CREDENTIALS_JSON) and takes a
+# couple of minutes, so CI cannot run it. Run it by hand after touching the
 # plugin manifest, hooks/hooks.json, the install layout, or path resolution.
 #
 #   bash tests/smoke-plugin.sh --host claude
@@ -37,6 +38,11 @@ if [ "$host" = codex ]; then
     echo "  Sign in with 'codex --login', or set KIBITZ_CODEX_AUTH_JSON to its auth.json path." >&2
     exit 2
   }
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo "smoke: Codex host smoke needs an interactive terminal for normal hook trust." >&2
+    echo "  Run: bash tests/smoke-plugin.sh --host codex" >&2
+    exit 2
+  fi
 
   umask 077
   ROOT="$(mktemp -d)"
@@ -49,12 +55,24 @@ if [ "$host" = codex ]; then
   # credential into the 0700 disposable root; it is never printed and the trap
   # removes it after the trust smoke finishes.
   mkdir -p "$CODEX_ROOT"
-  cp "$AUTH_SOURCE" "$CODEX_ROOT/auth.json"
-  chmod 600 "$CODEX_ROOT/auth.json"
-  cp -r "$PLUG" "$TEST_HOME/.agents/skills/kibitz"
+  cp "$AUTH_SOURCE" "$CODEX_ROOT/auth.json" || {
+    echo "smoke: could not copy local Codex credentials" >&2
+    exit 1
+  }
+  chmod 600 "$CODEX_ROOT/auth.json" || {
+    echo "smoke: could not protect temporary Codex credentials" >&2
+    exit 1
+  }
+  cp -aL "$PLUG" "$TEST_HOME/.agents/skills/kibitz" || {
+    echo "smoke: could not install the Codex skill layout" >&2
+    exit 1
+  }
   INSTALLED="$TEST_HOME/.agents/skills/kibitz"
 
-  CODEX_HOME="$CODEX_ROOT" "$INSTALLED/bin/kibitzer" install codex-user >/dev/null
+  CODEX_HOME="$CODEX_ROOT" "$INSTALLED/bin/kibitzer" install codex-user >/dev/null || {
+    echo "smoke: could not register disposable Codex hooks" >&2
+    exit 1
+  }
   jq -e '.hooks.UserPromptSubmit[0].hooks[0].command | contains("hook --host codex UserPromptSubmit")' \
     "$CODEX_ROOT/hooks.json" >/dev/null || { echo "smoke: Codex hook registration missing" >&2; exit 1; }
   CODEX_HOME="$CODEX_ROOT" "$INSTALLED/bin/kibitzer" on --host codex "$PROJ" >/dev/null
@@ -80,43 +98,77 @@ EOF
 fi
 
 command -v claude >/dev/null || { echo "smoke: claude not on PATH"; exit 2; }
+CLAUDE_AUTH_SOURCE="${KIBITZ_CLAUDE_CREDENTIALS_JSON:-$HOME/.claude/.credentials.json}"
+[ -r "$CLAUDE_AUTH_SOURCE" ] || {
+  echo "smoke: no readable local Claude credential at $CLAUDE_AUTH_SOURCE." >&2
+  echo "  Sign in with Claude Code, or set KIBITZ_CLAUDE_CREDENTIALS_JSON to its credentials file." >&2
+  exit 2
+}
 
+umask 077
 ROOT="$(mktemp -d)"
-CFG="$ROOT/cfg"; mkdir -p "$CFG/skills"
+TEST_HOME="$ROOT/home"
+CFG="$TEST_HOME/.claude"; mkdir -p "$CFG/skills" "$TEST_HOME/.agents/skills"
 STATE="$ROOT/state"
 PROJ="$ROOT/project"; mkdir -p "$PROJ"
 trap 'rm -rf "$ROOT"' EXIT
+# The isolated config needs an authenticated Claude client to execute the
+# positive command probe below. The copied credential remains in the private
+# temporary root and is removed by the trap.
+cp "$CLAUDE_AUTH_SOURCE" "$CFG/.credentials.json" || {
+  echo "smoke: could not copy local Claude credentials" >&2
+  exit 1
+}
+chmod 600 "$CFG/.credentials.json" || {
+  echo "smoke: could not protect temporary Claude credentials" >&2
+  exit 1
+}
 
-# The layout `npx skills add pnocera/kibitz -g -a claude-code` produces: the plugin directory
-# sitting directly in the personal skills dir.
-cp -r "$PLUG" "$CFG/skills/kibitz"
+# The standard npx layout has a real Codex directory and Claude's skill is a
+# relative symlink to it. This crosses both the symlink and Claude loader
+# boundaries rather than merely checking a copied directory.
+cp -aL "$PLUG" "$TEST_HOME/.agents/skills/kibitz" || {
+  echo "smoke: could not install the Claude skill layout" >&2
+  exit 1
+}
+ln -s ../../.agents/skills/kibitz "$CFG/skills/kibitz" || {
+  echo "smoke: could not create the Claude skills symlink" >&2
+  exit 1
+}
 [ -f "$CFG/skills/kibitz/.claude-plugin/plugin.json" ] || { echo "smoke: manifest missing"; exit 1; }
 
 ADVISOR_STATE_ROOT="$STATE" "$CFG/skills/kibitz/bin/kibitzer" on "$PROJ" >/dev/null
 H="$(printf '%s' "$PROJ" | cksum | tr -d ' ' | cut -c1-12)"
 
-# Also resolve the command through the Bash tool: the README's first instruction
-# is `kibitzer on`, which depends on the plugin exposing bin/ on that PATH. The
-# hook assertion below would still pass if that broke.
-WHICH="$PROJ/which-kibitzer.txt"
+OUT="$PROJ/kibitzer-status.txt"
+WHICH="$PROJ/kibitzer-path.txt"
+RUN_LOG="$PROJ/claude-output.txt"
 echo "smoke: starting a headless session (this takes a minute)…"
-( cd "$PROJ" && CLAUDE_CONFIG_DIR="$CFG" ADVISOR_STATE_ROOT="$STATE" \
-    timeout 180 claude -p "Run this bash command: command -v kibitzer > $WHICH; echo smoke" \
-    --permission-mode bypassPermissions >/dev/null 2>&1 )
+if ! ( cd "$PROJ" && CLAUDE_CONFIG_DIR="$CFG" ADVISOR_STATE_ROOT="$STATE" \
+    timeout 180 claude -p "Run this Bash script exactly:
+command -v kibitzer > \"$WHICH\"
+kibitzer status \"$PROJ\" > \"$OUT\"
+Then reply with exactly: smoke" \
+    --permission-mode bypassPermissions >"$RUN_LOG" 2>&1 ); then
+  echo "smoke: FAIL — headless Claude session failed." >&2
+  sed -n '1,80p' "$RUN_LOG" >&2
+  exit 1
+fi
 
-resolved="$(cat "$WHICH" 2>/dev/null)"
-want="$CFG/skills/kibitz/bin/kibitzer"
-if [ "$(readlink -f "$resolved" 2>/dev/null)" = "$(readlink -f "$want")" ]; then
-  echo "smoke: kibitzer resolves on the Bash tool PATH -> $resolved"
-else
-  cat >&2 <<EOF
-smoke: FAIL — the Bash tool did not resolve kibitzer to this plugin.
-  resolved: ${resolved:-<nothing>}
-  expected: $want
-The README's first instruction is \`kibitzer on\`, which needs the plugin to put
-its bin/ on that PATH. A shadowing binary or a loader change breaks it, and the
-hook assertion below would still have passed.
-EOF
+resolved="$(cat "$WHICH" 2>/dev/null || true)"
+expected="$CFG/skills/kibitz/bin/kibitzer"
+if [ "$resolved" != "$expected" ] && \
+   [ "$(readlink -f "$resolved" 2>/dev/null || true)" != "$(readlink -f "$expected")" ]; then
+  echo "smoke: FAIL — Claude Bash PATH did not resolve this installed kibitzer." >&2
+  echo "  resolved: ${resolved:-<nothing>}" >&2
+  echo "  expected: $expected" >&2
+  sed -n '1,80p' "$RUN_LOG" >&2
+  exit 1
+fi
+if ! grep -q 'enabled : yes' "$OUT"; then
+  echo "smoke: FAIL — Claude did not run kibitzer status against the enabled smoke state." >&2
+  sed -n '1,80p' "$OUT" >&2
+  sed -n '1,80p' "$RUN_LOG" >&2
   exit 1
 fi
 
@@ -132,7 +184,7 @@ if [ "${SMOKE_CHANNEL:-0}" = "1" ]; then
   # nothing, and would fail even when loading works correctly.
   ( cd "$PROJ" && CLAUDE_CONFIG_DIR="$CFG" ADVISOR_STATE_ROOT="$STATE" \
       timeout 180 claude -p "Run this bash command: sleep 40" \
-      --dangerously-load-development-channels "server:kibitz" \
+      --dangerously-load-development-channels "plugin:kibitz:kibitz" \
       --permission-mode bypassPermissions >"$PROJ/chan.txt" 2>&1 ) &
   CLAUDE_PID=$!
   NEWSID=""

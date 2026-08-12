@@ -16,37 +16,40 @@ npx skills add pnocera/kibitz -g -a claude-code codex
 ```
 
 Claude plugin hooks are active after reload. Codex still needs
-`kibitzer install codex-user`, normal Codex hook-trust approval, and a new Codex session. Never
-use a hook-trust bypass.
+`$HOME/.agents/skills/kibitz/bin/kibitzer install codex-user`, normal Codex hook-trust approval,
+and a new Codex session. Never use a hook-trust bypass.
 
 The shell command is `kibitzer`, not `kibitz`: `/usr/bin/kibitz` is expect(1)'s utility on most
 Debian/Ubuntu systems, and a plugin's `bin/` does not take precedence over `/usr/bin`, so a command
 named `kibitz` runs the wrong program. The skill is still `/kibitz` — that namespace is Claude
 Code's, not the shell's.
 
-If `kibitzer` is ever shadowed too, invoke it by path instead — that always works:
-`~/.claude/skills/kibitz/bin/kibitzer`.
+Claude Code exposes this plugin's `bin/` directory on its Bash-tool `PATH`, so Claude uses
+`kibitzer` below. Codex does not expose that directory on its tool `PATH`; use the literal
+`$HOME/.agents/skills/kibitz/bin/kibitzer` there, or run that installed executable's `link`
+command once if a plain shell command is preferred.
 
 ## Controls
 
 | Ask | Run |
 |---|---|
-| "advisor on" | `kibitzer on --host claude\|codex` |
-| "advisor off" | `kibitzer off --host claude\|codex` — reaps in-flight work and clears pending advice |
-| "quiet the advisor" | `kibitzer quiet on --host claude\|codex` — keeps analysing and logging, stops injecting |
-| "advisor status" | `kibitzer status --host claude\|codex` |
-| "what has the advisor said" | `kibitzer log` |
-| "show me the advisor live" | `kibitzer pane` — Herdr side pane following the log |
-| "what should I do next / ask it now" | `kibitzer advise-now` |
-| "stop telling me about X" | `kibitzer mute "X"` (`mute list`, `mute clear`) |
-| "is it saying anything useful" | `kibitzer stats` — counts by the kind the advisor chose |
+| "advisor on" | Claude: `kibitzer on --host claude`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer on --host codex` |
+| "advisor off" | Claude: `kibitzer off --host claude`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer off --host codex` — reaps in-flight work and clears pending advice |
+| "quiet the advisor" | Claude: `kibitzer quiet on --host claude`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer quiet on --host codex` — keeps analysing and logging, stops injecting |
+| "advisor status" | Claude: `kibitzer status --host claude`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer status --host codex` |
+| "what has the advisor said" | Claude: `kibitzer log`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer log --host codex` |
+| "show me the advisor live" | Claude: `kibitzer pane`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer pane --host codex` (needs a Herdr terminal) |
+| "what should I do next / ask it now" | Claude: `kibitzer advise-now`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer advise-now --host codex` |
+| "stop telling me about X" | Claude: `kibitzer mute "X"`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer mute "X" --host codex` (`mute list`, `mute clear`) |
+| "is it saying anything useful" | Claude: `kibitzer stats`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer stats --host codex` — counts by the kind the advisor chose |
 
 Default is **off**. Controls without `--host` act on both installed hosts. Session-specific
 commands such as `log`, `stats`, and `advise-now` default to Claude; use `--host codex` for the
 Codex session. Opt-in is per project directory.
 
-New project: just `kibitzer on`. A plugin install needs no per-project hook registration; hook changes
-themselves need a restart or `/reload-plugins`, since they are snapshotted at session start.
+New project: use the matching `on` command above. A plugin install needs no per-project hook
+registration; hook changes themselves need a restart or `/reload-plugins`, since they are
+snapshotted at session start.
 
 ## What to do with an advisory
 
@@ -74,14 +77,19 @@ changes without it.
 ## What it is not
 
 It issues no verdicts, no severities, no pass/fail, and it blocks nothing. If output ever starts
-reading like a review gate, that is a defect — `kibitzer lint <file>` checks for it.
+reading like a review gate, that is a defect — Claude: `kibitzer lint <file>`; Codex:
+`$HOME/.agents/skills/kibitz/bin/kibitzer lint <file>`.
 
 ## Troubleshooting
 
-- Nothing appearing → `kibitzer status`. Advice arrives at the *next* tool call after a cycle
-  completes, not during the turn that triggered it.
+- Nothing appearing → Claude: `kibitzer status`; Codex:
+  `$HOME/.agents/skills/kibitz/bin/kibitzer status --host codex`. Advice arrives at the *next* tool
+  call after a cycle completes, not during the turn that triggered it.
 - Ordinary edits are debounced (`ADVISOR_MIN_INTERVAL`, default 45s). Claude host failures and
   turn endings can trigger a cycle immediately. Codex uses only live-proven hook events.
-- `kibitzer doctor` checks dependencies. It needs Bun on the PATH: that is the shebang's
-  interpreter, so a missing Bun breaks hooks before kibitz can handle it.
-- A failed cycle is reported by `kibitzer status`; full detail in the session's `worker.log`.
+- Claude: `kibitzer doctor`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer doctor` checks
+  dependencies. It needs Bun on the PATH: that is the shebang's interpreter, so a missing Bun
+  breaks hooks before kibitz can handle it.
+- A failed cycle is reported by Claude: `kibitzer status`; Codex:
+  `$HOME/.agents/skills/kibitz/bin/kibitzer status --host codex`; full detail is in the session's
+  `worker.log`.
