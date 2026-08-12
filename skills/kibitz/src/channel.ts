@@ -17,7 +17,7 @@
 // with advice.log as the record of truth.
 //
 // Requires a launch flag, because custom channels are a research preview:
-//   claude --dangerously-load-development-channels server:plugin:kibitz:kibitz
+//   claude --dangerously-load-development-channels plugin:kibitz@skills-dir
 //
 // Session binding: Claude Code does not tell an MCP server which session it
 // serves, so the channel establishes it from its own ancestry against Claude's

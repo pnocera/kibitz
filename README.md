@@ -193,14 +193,14 @@ session. Channels are a research preview and custom ones are not allowlisted, so
 flag:
 
 ```bash
-claude --dangerously-load-development-channels server:plugin:kibitz:kibitz
+claude --dangerously-load-development-channels plugin:kibitz@skills-dir
 ```
 
-The flag uses `server:<name>`; this plugin's configured MCP-server name is
-`plugin:kibitz:kibitz`, so the full identifier is
-`server:plugin:kibitz:kibitz`. The development-channel consent warning is
-expected; **“no MCP server configured with that name” is not**. If you see that
-message, the old `server:kibitz` identifier was used and the push channel is
+The flag takes the plugin identity, which `npx skills` registers as
+`kibitz@skills-dir`. The MCP-server identity shown in `/mcp`
+(`plugin:kibitz:kibitz`) is not a channel-flag argument. The development-channel
+consent warning is expected; **“no MCP server configured with that name” is
+not**. If you see it, a `server:` identifier was used and the push channel is
 disabled.
 
 It is a **second consumer of the same queue**, not a replacement. It takes the same atomic per-id
