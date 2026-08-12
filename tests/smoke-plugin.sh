@@ -98,6 +98,10 @@ EOF
 fi
 
 command -v claude >/dev/null || { echo "smoke: claude not on PATH"; exit 2; }
+# Checked here, not at first use: the channel phase runs after a two-minute
+# headless session, and a missing dependency must not cost that first.
+[ "${SMOKE_CHANNEL:-0}" != "1" ] || command -v jq >/dev/null || {
+  echo "smoke: jq not on PATH, and SMOKE_CHANNEL=1 needs it" >&2; exit 2; }
 CLAUDE_AUTH_SOURCE="${KIBITZ_CLAUDE_CREDENTIALS_JSON:-$HOME/.claude/.credentials.json}"
 [ -r "$CLAUDE_AUTH_SOURCE" ] || {
   echo "smoke: no readable local Claude credential at $CLAUDE_AUTH_SOURCE." >&2
@@ -174,7 +178,7 @@ fi
 
 # Optional second phase: the channel, which only registers when Claude is
 # launched with the development-channel flag. Unit tests can prove the queue
-# logic and the .mcp.json shape, but not that Claude discovers and launches it.
+# logic and the registration shape, but not that Claude discovers and launches it.
 if [ "${SMOKE_CHANNEL:-0}" = "1" ]; then
   echo "smoke: channel phase — registering the managed user channel…"
   if ! CLAUDE_CONFIG_DIR="$CFG" "$CFG/skills/kibitz/bin/kibitzer" install claude-channel-user; then
@@ -187,16 +191,37 @@ if [ "${SMOKE_CHANNEL:-0}" = "1" ]; then
       echo "smoke: channel FAIL — managed registration is missing from Claude's user config." >&2
       exit 1
     }
+  # The claim below proves only that SOME consumer took the record. That is a
+  # sound proof of the channel only while the channel is the sole consumer, so
+  # assert it: any other configured server running `kibitzer channel` would
+  # claim, ledger, and then silently drop the advisory, and the phase would still
+  # print PASS.
+  if [ -e "$CFG/skills/kibitz/.mcp.json" ]; then
+    echo "smoke: channel FAIL — the plugin ships an auto-start MCP server; it would" >&2
+    echo "  race the channel for the same outbox and drop what it claims." >&2
+    exit 1
+  fi
+  others="$(jq -r '(.mcpServers // {}) | to_entries
+    | map(select(.key != "kibitz-channel" and ((.value.args // []) | index("channel"))))
+    | map(.key) | join(" ")' "$CFG/.claude.json")"
+  [ -z "$others" ] || {
+    echo "smoke: channel FAIL — other channel consumers are registered: $others" >&2
+    exit 1
+  }
   echo "smoke: channel phase — starting a session, then seeding ITS queue…"
   SD="$STATE/projects/$H/sessions"
   before="$(ls "$SD" 2>/dev/null | sort | tr '\n' ' ')"
   # The channel binds to the session that owns it, so the advisory has to be
   # queued for that session -- seeding an earlier session's outbox proves
   # nothing, and would fail even when loading works correctly.
-  ( cd "$PROJ" && CLAUDE_CONFIG_DIR="$CFG" ADVISOR_STATE_ROOT="$STATE" \
+  # `exec`, so $! is the timeout process itself rather than a wrapper subshell.
+  # Killing a subshell would leave the real claude -- and the channel it started
+  # -- alive for the full 180s, polling a state tree the EXIT trap has already
+  # deleted, and each run would leak another one.
+  ( cd "$PROJ" && exec env CLAUDE_CONFIG_DIR="$CFG" ADVISOR_STATE_ROOT="$STATE" \
       timeout 180 claude -p "Run this bash command: sleep 40" \
       --dangerously-load-development-channels "server:kibitz-channel" \
-      --permission-mode bypassPermissions >"$PROJ/chan.txt" 2>&1 ) &
+      --permission-mode bypassPermissions ) >"$PROJ/chan.txt" 2>&1 &
   CLAUDE_PID=$!
   NEWSID=""
   for _ in $(seq 1 120); do
@@ -208,7 +233,8 @@ if [ "${SMOKE_CHANNEL:-0}" = "1" ]; then
   done
   if [ -z "$NEWSID" ]; then
     echo "smoke: channel FAIL — no new session appeared; hooks did not run." >&2
-    kill "$CLAUDE_PID" 2>/dev/null; exit 1
+    kill "$CLAUDE_PID" 2>/dev/null; wait "$CLAUDE_PID" 2>/dev/null
+    exit 1
   fi
   EP="$(cut -d' ' -f2 "$STATE/projects/$H/state")"
   mkdir -p "$SD/$NEWSID/outbox"

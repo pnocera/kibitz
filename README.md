@@ -189,8 +189,8 @@ By default an advisory waits for your next tool call. That is seconds during act
 advisory produced while the session sits idle waits until you do something.
 
 kibitz also ships a Claude Code **channel** — an MCP server that pushes advisories into the running
-session. A skills-directory plugin is loaded for MCP but is not a channel-installable marketplace
-plugin, so register the named user channel once through kibitz:
+session. Claude loads a channel only from a named MCP server. It does not load one from this
+skills-directory plugin. Thus register the named user channel once:
 
 ```bash
 kibitzer install claude-channel-user
@@ -206,9 +206,14 @@ The command uses Claude Code's own MCP configuration command; it honours
 `CLAUDE_CONFIG_DIR`, refuses another server named `kibitz-channel`, and never
 writes Claude's live config itself. Use `--replace-channel` only to deliberately
 take over that name. Accept the development-channel confirmation. `/mcp` should show
-`kibitz-channel` connected. Do not pass `plugin:kibitz@skills-dir` or either
-`plugin:kibitz:kibitz` form to the channel flag: those identify the skills-dir
-plugin/MCP server but are not an installed channel plugin.
+`kibitz-channel` connected. Give the channel flag this name only. A `plugin:kibitz…`
+form names the skills-dir plugin, which Claude never loads as a channel.
+
+`kibitz-channel` must stay the only server that runs `kibitzer channel`. A second
+one also consumes the queue, but Claude does not load it as a channel: it wins the
+atomic claim, writes the ledger, and its notification goes nowhere. The advisory is
+then recorded as delivered, and the hook drain will not send it again. This is why
+the plugin itself starts no MCP server.
 
 The launch flag is an experimental Claude Code feature and remains per-session;
 the installer cannot make it permanent. Remove the registration later with
@@ -244,7 +249,7 @@ delivery, the channel's MCP handshake and its parity with the hook drain, and ho
 
 `tests/smoke-plugin.sh --host claude` is separate and opt-in, and `SMOKE_CHANNEL=1` adds a second phase that
 queues an advisory and checks a real Claude launched with the development-channel flag actually
-claims it — the unit tests can prove the queue logic and the `.mcp.json` shape, but not that Claude
+claims it — the unit tests can prove the queue logic and the registration shape, but not that Claude
 discovers and launches the channel. The base phase: it installs into the real layout, starts a headless
 Claude Code, and asserts a hook actually fired. It uses an owner-only temporary copy of the local
 Claude credentials file (or `KIBITZ_CLAUDE_CREDENTIALS_JSON`) for its disposable config. A token

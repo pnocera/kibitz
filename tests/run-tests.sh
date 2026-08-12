@@ -660,10 +660,14 @@ check "answers tools/list rather than erroring (one-way channel)" \
       | timeout 5 "$ADV" channel 2>/dev/null | sed -n 2p | jq -c ".result.tools")" = "[]" ]'
 check "tells Claude the events are untrusted and one-way" \
   'rpc "$INIT" | jq -r ".result.instructions" | grep >/dev/null "untrusted"'
-check "ships an .mcp.json pointing at the channel subcommand" \
-  '[ "$(jq -r ".mcpServers.kibitz.args[0]" "$PLUG/.mcp.json")" = "channel" ]'
-check "the channel resolves its binary through CLAUDE_PLUGIN_ROOT" \
-  'jq -r ".mcpServers.kibitz.command" "$PLUG/.mcp.json" | grep >/dev/null "CLAUDE_PLUGIN_ROOT"'
+# The plugin must NOT auto-start a channel process. A skills-directory plugin is
+# loaded for MCP but never as a channel, so such a process initializes, wins the
+# atomic claim, writes the ledger -- and then emits a channel notification into a
+# client that is not a channel and drops it. The advisory is committed as
+# delivered and the hook drain will not retry it: silent loss. The named user
+# registration is the only supported channel, and it must be the only consumer.
+check "ships no auto-start MCP server that would become a second channel consumer" \
+  '[ ! -e "$PLUG/.mcp.json" ]'
 
 # It must be a second consumer of the SAME queue and ledger, never a duplicate
 # path: whichever of the two runs delivers, and neither repeats the other.
