@@ -8,7 +8,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import {
   BIN, HOME, OURS_RE, PROMPT_TMPL, SCHEMA,
-  appendSync, currentHost, currentSession, deliveredCount, ensureHostRoot, epochOf, exists, isEnabled, isoNow, listJson, mkdirp, outcomeMap, projDir, read, readIssues,
+  appendSync, currentHost, currentSession, deliveredCount, ensureHostRoot, epochOf, exists, isEnabled, isoNow, issueStateMap, listJson, mkdirp, outcomeMap, projDir, read, readIssueEvents, readIssues,
   killTree, readState, rm, sessDir, verifiedWorkerPid, which, writeState,
 } from "./core.ts"
 import { adapterFor } from "./hosts.ts"
@@ -260,6 +260,89 @@ export function cmdMark(idPrefix?: string, outcome?: string, a?: string, b?: str
   return 0
 }
 
+const findIssue = (cwd: string, prefix: string) => {
+  const sid = currentSession(cwd)
+  if (!sid) return { error: "kibitzer: no session yet" as const }
+  const d = sessDir(cwd, sid)
+  const byId = new Map(readIssues(d).map(issue => [issue.id, issue]))
+  const hits = [...byId.values()].filter(issue => issue.id.startsWith(prefix))
+  if (hits.length !== 1) return { error: hits.length ? `kibitzer: '${prefix}' is ambiguous` : `kibitzer: no issue here starts with '${prefix}'` }
+  return { d, issue: hits[0]! }
+}
+
+/** Explicit operator feedback only. It is append-only and has no hook path,
+ * so it cannot become an acknowledgement gate or delay a host boundary. */
+export function cmdIssueState(action: "ack" | "resolve" | "defer" | "reopen", idPrefix?: string, reason?: string, cwd = process.cwd()): number {
+  if (!idPrefix) { err(`usage: kibitzer ${action} <id>${action === "defer" ? " [reason]" : ""} [cwd]`); return 2 }
+  const hit = findIssue(cwd, idPrefix)
+  if ("error" in hit) { err(hit.error); return 1 }
+  const state = action === "ack" ? "acknowledged" : action === "resolve" ? "resolved"
+    : action === "defer" ? "deferred" : "open"
+  const eventReason = reason ?? (action === "reopen" ? "operator reopen" : undefined)
+  if (!appendSync(path.join(hit.d!, "issue-events.jsonl"), JSON.stringify({ id: hit.issue!.id, state, at: isoNow(),
+    ...(eventReason ? { reason: eventReason } : {}), by: "operator" }) + "\n")) {
+    err("kibitzer: could not record that"); return 1
+  }
+  out(`kibitzer: ${hit.issue!.id.slice(0, 6)} ${state}${eventReason ? ` (${eventReason})` : ""}`)
+  return 0
+}
+
+function currentIssues(cwd: string) {
+  const sid = currentSession(cwd)
+  if (!sid) return null
+  const d = sessDir(cwd, sid)
+  const issues = new Map(readIssues(d).map(issue => [issue.id, issue]))
+  return { d, issues: [...issues.values()], states: issueStateMap(d) }
+}
+
+export function cmdOpen(cwd = process.cwd()): number {
+  const current = currentIssues(cwd)
+  if (!current) { err("kibitzer: no session yet"); return 1 }
+  const open = current.issues.filter(issue => {
+    const state = current.states.get(issue.id)?.state ?? "open"
+    return state === "open" || state === "deferred"
+  })
+  if (!open.length) { out("kibitzer: no open issues"); return 0 }
+  for (const issue of open) out(`${issue.id.slice(0, 6)}  ${current.states.get(issue.id)?.state ?? "open"}  ${issue.claim ?? issue.kind ?? "issue"}`)
+  return 0
+}
+
+export function cmdSummary(cwd = process.cwd()): number {
+  const current = currentIssues(cwd)
+  if (!current) { err("kibitzer: no session yet"); return 1 }
+  const visible = current.issues.filter(issue => {
+    const state = current.states.get(issue.id)?.state ?? "open"
+    return state === "open" || state === "deferred"
+  })
+  if (!visible.length) { out("kibitzer: no open or deferred issues"); return 0 }
+  for (const issue of visible) {
+    const event = current.states.get(issue.id)
+    const milestone = issue.timing === "milestone" ? "restore milestone" : issue.timing === "before_next_mutation" ? "before next mutation" : "fresh evidence"
+    out(`${issue.id.slice(0, 6)}  ${event?.state ?? "open"}  evidence ${issue.at}  re-surfaces: ${milestone}`)
+    out(`  ${issue.claim ?? issue.kind ?? "issue"}`)
+  }
+  return 0
+}
+
+/** Inspect the bounded redacted corpus without invoking an advisor or touching
+ * the outbox. `--live` is intentionally diagnostic: it only confirms the
+ * current host has a session/context available for an operator comparison. */
+export function cmdReplay(fixture?: string, live = false, cwd = process.cwd()): number {
+  const defaultFixture = path.resolve(HOME, "..", "..", "tests", "fixtures", "codex-ops-session", "replay.json")
+  const source = fixture || defaultFixture
+  let corpus: any
+  try { corpus = JSON.parse(read(source) ?? "") } catch { err(`kibitzer: unreadable replay corpus ${source}`); return 1 }
+  if (!Array.isArray(corpus?.cases)) { err(`kibitzer: replay corpus has no cases: ${source}`); return 1 }
+  out(`kibitzer: replay corpus ${source} (${corpus.cases.length} cases; diagnostic only)`)
+  for (const item of corpus.cases) out(`  ${item.name}: ${item.expect}`)
+  if (live) {
+    const sid = currentSession(cwd)
+    const transcript = sid ? read(path.join(sessDir(cwd, sid), "transcript"))?.trim() : ""
+    out(`live comparison: ${transcript ? "bounded current context available" : "no current transcript"}; no advisory was invoked or injected`)
+  }
+  return 0
+}
+
 /** The measurement the design asks for: is this offering anything beyond
  *  fault-finding, and did any of it change a decision? Volume answers neither,
  *  so it is reported as what it is -- attempts to say something -- next to the
@@ -270,12 +353,14 @@ export function cmdStats(cwd = process.cwd()): number {
   const d = sessDir(cwd, sid)
   const kinds = (read(path.join(d, "kinds")) ?? "").split("\n").filter(Boolean)
   if (kinds.length === 0) { out("kibitzer: nothing said yet"); return 0 }
-  const issues = readIssues(d)
+  const issues = [...new Map(readIssues(d).map(issue => [issue.id, issue])).values()]
   const held = (read(path.join(d, "repeats")) ?? "").split("\n").filter(Boolean).length
   const marks = outcomeMap(d)
+  const states = issueStateMap(d)
+  const events = readIssueEvents(d)
 
   out(`advisories published : ${kinds.length}`)
-  if (issues.length > 0) out(`distinct issues      : ${issues.length}`)
+  if (issues.length > 0) out(`distinct issues (semantic) : ${issues.length}`)
   if (held > 0) out(`repeats held back    : ${held}`)
   const counted = new Map<string, number>()
   for (const [, e] of marks) counted.set(e.outcome, (counted.get(e.outcome) ?? 0) + 1)
@@ -283,12 +368,42 @@ export function cmdStats(cwd = process.cwd()): number {
     const parts = OUTCOMES.filter(o => counted.get(o)).map(o => `${counted.get(o)} ${o}`)
     parts.push(`${issues.length - marks.size} unmarked`)
     out(`outcomes             : ${parts.join(", ")}`)
+    const stateCounts = new Map<string, number>()
+    for (const issue of issues) {
+      const state = states.get(issue.id)?.state ?? "open"
+      stateCounts.set(state, (stateCounts.get(state) ?? 0) + 1)
+    }
+    out(`issue states         : ${[...stateCounts].map(([s, n]) => `${n} ${s}`).join(", ")}`)
+    const resolved = issues.filter(issue => states.get(issue.id)?.state === "resolved")
+    const minutes = resolved.map(issue => {
+      const at = states.get(issue.id)?.at ?? issue.at
+      return Math.max(0, Date.parse(at) - Date.parse(issue.at)) / 60000
+    }).filter(Number.isFinite)
+    if (minutes.length) out(`delivery to resolution : ${(minutes.reduce((a, b) => a + b, 0) / minutes.length).toFixed(1)}m mean`)
+    const reopened = events.filter(event => event.state === "open" &&
+      (event.by === "operator" || /fresh evidence|milestone|reopen/.test(event.reason ?? ""))).length
+    if (reopened) out(`reopened             : ${reopened}`)
+    const phaseOutcomes = new Map<string, number>()
+    for (const issue of issues) {
+      const outcome = marks.get(issue.id)?.outcome ?? states.get(issue.id)?.state ?? "open"
+      const key = `${issue.phase ?? "unknown"}: ${outcome}`
+      phaseOutcomes.set(key, (phaseOutcomes.get(key) ?? 0) + 1)
+    }
+    out(`outcomes by phase    : ${[...phaseOutcomes].map(([p, n]) => `${n} ${p}`).join(", ")}`)
   }
+  const suppression = new Map<string, number>()
+  for (const line of (read(path.join(d, "suppressions.jsonl")) ?? "").split("\n")) {
+    try { const reason = JSON.parse(line).reason; if (reason) suppression.set(reason, (suppression.get(reason) ?? 0) + 1) } catch {}
+  }
+  if (suppression.size) out(`suppressed           : ${[...suppression].map(([r, n]) => `${n} ${r}`).join(", ")}`)
   out("")
   const counts = new Map<string, number>()
   for (const k of kinds) counts.set(k, (counts.get(k) ?? 0) + 1)
   for (const [k, n] of [...counts].sort((a, b) => b[1] - a[1]))
     out(`  ${String(n).padStart(6)} ${k}`)
+  const phases = new Map<string, number>()
+  for (const issue of issues) if (issue.phase) phases.set(issue.phase, (phases.get(issue.phase) ?? 0) + 1)
+  if (phases.size) out(`phases               : ${[...phases].map(([p, n]) => `${n} ${p}`).join(", ")}`)
   return 0
 }
 
@@ -386,6 +501,13 @@ export const USAGE = `kibitz — cross-host background advisory
   kibitzer advise-now [cwd]    ask for a contribution now, without waiting
   kibitzer mute <text>|list|clear   stop hearing about a topic
   kibitzer stats [cwd]         what it has said, and what came of it
+  kibitzer open [cwd]          pull-based list of unresolved issues
+  kibitzer summary [cwd]       open/deferred issues and their re-surface milestone
+  kibitzer ack <id> [cwd]      record optional acknowledgement; never a gate
+  kibitzer resolve <id> [cwd]  record an issue as resolved
+  kibitzer defer <id> [reason] [cwd]  keep it visible without reinjecting it
+  kibitzer reopen <id> [reason] [cwd] explicitly re-open a declined/resolved issue
+  kibitzer replay [fixture] [--live]  inspect the deterministic corpus; never inject advice
   kibitzer mark <id> <outcome> record what an advisory led to; the id is the
                                short code in the log. accepted, investigated,
                                declined, or superseded <id it duplicates>.

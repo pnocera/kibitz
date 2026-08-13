@@ -43,10 +43,18 @@ command once if a plain shell command is preferred.
 | "stop telling me about X" | Claude: `kibitzer mute "X"`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer mute "X" --host codex` (`mute list`, `mute clear`) |
 | "is it saying anything useful" | Claude: `kibitzer stats`; Codex: `$HOME/.agents/skills/kibitz/bin/kibitzer stats --host codex` — volume, distinct issues, and outcomes, kept apart |
 | "that one was useful / I disagree with it" | Claude: `kibitzer mark <id> accepted\|investigated\|declined\|superseded <id>`; Codex: same with `--host codex`. The id is the short code at the head of each log entry. A **declined** issue stays quiet even after its evidence changes |
+| "show open advisor concerns" | `kibitzer open` / `kibitzer summary` (Codex: add `--host codex`) — pull-based, never injected |
+| "defer / resolve that advice" | `kibitzer defer\|resolve\|ack\|reopen <id>` (Codex: add `--host codex`) — optional append-only feedback, never a gate |
 
 Default is **off**. Controls without `--host` act on both installed hosts. Session-specific
 commands such as `log`, `stats`, `mark`, and `advise-now` default to Claude; use `--host codex` for the
 Codex session. Opt-in is per project directory.
+
+Codex-host sessions use the lifecycle policy by default. It uses stable claims and issue state to suppress unchanged repeats, retains open
+concerns for `open`/`summary`, and re-surfaces them only for fresh evidence or a
+relevant milestone. SSH transport failures remain transport-unknown, not remote
+results; clipped output remains incomplete evidence. This policy is advisory and
+non-blocking. Set `ADVISOR_POLICY=legacy` only for a temporary rollback.
 
 New project: use the matching `on` command above. A plugin install needs no per-project hook
 registration; hook changes themselves need a restart or `/reload-plugins`, since they are

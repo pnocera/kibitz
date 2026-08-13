@@ -99,6 +99,11 @@ kibitzer advise-now [cwd]                ask for a contribution now, without wai
 kibitzer mute <text>|list|clear          stop hearing about a topic
 kibitzer stats [cwd]                     what it has said, and what came of it
 kibitzer mark <id> <outcome> [<id>]      record what an advisory led to
+kibitzer open [cwd]                      list unresolved issues without injecting them
+kibitzer summary [cwd]                   list open/deferred issues and re-surface milestones
+kibitzer ack|resolve <id> [cwd]          optional append-only issue feedback
+kibitzer defer <id> [reason] [cwd]       retain an issue without repeated delivery
+kibitzer reopen <id> [reason] [cwd]      explicitly re-open an issue
 kibitzer lint <file>                     fail if a file reads like a review gate
 kibitzer install codex-user              register user-scoped Codex hooks
 ```
@@ -164,7 +169,30 @@ and everything else counts as unmarked. A **declined** issue stays quiet even wh
 changes, which is the one thing no signature check can decide for you. `stats` then separates
 volume from distinct issues from outcomes, because the first answers nothing you wanted to know.
 
-**What it costs you.** At most 3 advisories per tool call. Hooks do file I/O only and run in tens of
+### Codex usefulness policy
+
+Codex-host sessions use this policy by default. It gives each advisory a
+stable `claim`, `timing`, and `evidence_freshness`, and keeps issue state in an
+append-only register separate from delivery records. An unchanged open concern
+is pull-visible through `open` and `summary`, but is not injected again. It can
+re-surface when fresh evidence appears or at its recorded milestone; a declined
+issue stays quiet until `reopen`. Set `ADVISOR_POLICY=legacy` only to
+temporarily restore the prior repetition policy while diagnosing a regression.
+
+The policy classifies tool observations before the advisor sees them. In
+particular, SSH exit 255 is **transport unknown**, not a remote result, and
+truncated output is marked incomplete. Codex sessions default to one ordinary
+injected advisory; separate current-activity `now` risks may use the remaining
+two slots. Set `ADVISOR_MAX_PER_CYCLE` to tune that cap while evaluating it.
+
+Feedback is optional and never affects a hook. `ack`, `resolve`, `defer`, and
+`reopen` append operator-entered events; they do not acknowledge delivery,
+authorize work, or delay Codex. `stats` reports semantic issue states,
+re-openings, suppression reasons, phase distribution, and mean recorded
+delivery-to-resolution time. `summary` is always pull-based.
+
+**What it costs you.** At most 3 advisories per tool call (one ordinary advisory
+under the default Codex lifecycle policy). Hooks do file I/O only and run in tens of
 milliseconds against Claude Code's 2s budget; the Codex call is fully detached and never blocks a
 turn.
 

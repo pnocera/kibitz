@@ -15,7 +15,7 @@
 //   - Advisory register only. No verdicts, no severities, no gate language.
 
 import {
-  USAGE, cmdAdviseNow, cmdCount, cmdDoctor, cmdLint, cmdLog, cmdMark, cmdMute, cmdOff,
+  USAGE, cmdAdviseNow, cmdCount, cmdDoctor, cmdIssueState, cmdLint, cmdLog, cmdMark, cmdMute, cmdOff, cmdOpen, cmdReplay, cmdSummary,
   cmdOn, cmdPane, cmdQuiet, cmdStats, cmdStatus, cmdStatusline, cmdTail,
 } from "../src/commands.ts"
 import { runHook } from "../src/hooks.ts"
@@ -100,10 +100,17 @@ try {
     case "advise-now": status = runControls(false, () => cmdAdviseNow(rest[0])); break
     case "mute":       status = runControls(true, () => cmdMute(rest[0], rest[1])); break
     case "stats":      status = runControls(false, () => cmdStats(rest[0])); break
+    case "open":       status = runControls(false, () => cmdOpen(rest[0])); break
+    case "summary":    status = runControls(false, () => cmdSummary(rest[0])); break
+    case "replay":     status = runControls(false, () => cmdReplay(rest.find(x => x !== "--live"), rest.includes("--live"))); break
     // Session-specific, like stats and log: the id exists in one host's register
     // only, so running it against both would record the outcome on one side and
     // fail on the other -- or resolve a coincident prefix to somebody else's.
     case "mark":       status = runControls(false, () => cmdMark(rest[0], rest[1], rest[2], rest[3])); break
+    case "ack":        status = runControls(false, () => cmdIssueState("ack", rest[0], undefined, rest[1])); break
+    case "resolve":    status = runControls(false, () => cmdIssueState("resolve", rest[0], undefined, rest[1])); break
+    case "defer":      status = runControls(false, () => cmdIssueState("defer", rest[0], rest[1], rest[2])); break
+    case "reopen":     status = runControls(false, () => cmdIssueState("reopen", rest[0], rest[1], rest[2])); break
     case "statusline": status = runControls(false, () => cmdStatusline(rest[0])); break
     case "doctor":
       if (scope === "all") status = runControls(true, () => {

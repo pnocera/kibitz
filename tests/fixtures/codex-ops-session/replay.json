@@ -1,0 +1,11 @@
+{
+  "description": "Redacted seed corpus from the Codex operational session. No credentials or full logs are retained.",
+  "cases": [
+    {"name":"persistent-timer-first","event":{"tool":"exec_command","input":"systemctl show producer.timer -p Persistent","local_exit":0,"output":"complete"},"expect":"useful"},
+    {"name":"persistent-timer-poll","event":{"tool":"exec_command","input":"systemctl is-active producer.timer","local_exit":0,"output":"complete"},"expect":"duplicate-open"},
+    {"name":"persistent-timer-restore","event":{"tool":"exec_command","input":"systemctl enable --now producer.timer","local_exit":0,"output":"complete"},"expect":"useful"},
+    {"name":"dead-controlmaster","event":{"tool":"exec_command","input":"ssh host systemctl status producer","local_exit":255,"transport":"unknown","output":"truncated","error":"Control socket connect failed"},"expect":"stale/insufficient-evidence"},
+    {"name":"from-db-rebaseline","event":{"tool":"exec_command","input":"sync --from-db rebaseline","local_exit":0,"output":"complete"},"expect":"handled"},
+    {"name":"managed-unit-environment","event":{"tool":"exec_command","input":"systemctl restart syncd","local_exit":1,"output":"complete","error":"EnvironmentFile missing"},"expect":"useful"}
+  ]
+}

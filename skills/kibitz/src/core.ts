@@ -51,6 +51,10 @@ const num = (v: string | undefined, d: number) => {
   return Number.isFinite(n) ? n : d
 }
 export const MAX_PER_DRAIN = num(process.env.ADVISOR_MAX_PER_DRAIN, 3)
+/** Codex sessions use lifecycle filtering by default. Set ADVISOR_POLICY=legacy
+ * only as an explicit rollback while diagnosing a deployment. Claude-host
+ * sessions retain their established policy. */
+export const ISSUE_LIFECYCLE_V1 = currentHost() === "codex" && process.env.ADVISOR_POLICY !== "legacy"
 export const LEASE_SECONDS = num(process.env.ADVISOR_LEASE_SECONDS, 120)
 export const CODEX_TIMEOUT = num(process.env.ADVISOR_CODEX_TIMEOUT, 300)
 export const CLAUDE_TIMEOUT = num(process.env.ADVISOR_CLAUDE_TIMEOUT, 300)
@@ -508,6 +512,29 @@ export const REPEAT_SIMILARITY = (() => {
 export interface Issue {
   id: string; at: string; kind: string; fp: string
   tokens: string[]; paths: string[]; sig: string
+  /** New records carry a stable identity; old delivery-shaped records remain
+   * readable and are mapped to their historical id below. */
+  key?: string; claim?: string; scope?: string; timing?: AdviceTiming
+  evidence_freshness?: EvidenceFreshness; phase?: OperationPhase
+}
+
+export type AdviceTiming = "now" | "before_next_mutation" | "milestone" | "deferred"
+export type EvidenceFreshness = "current_activity" | "current_state" | "historical_context"
+export type IssueState = "open" | "acknowledged" | "resolved" | "declined" | "deferred"
+export type OperationPhase = "inspect" | "diagnose" | "mutate" | "wait_monitor" | "verify" | "restore" | "unknown"
+
+export const validTiming = (v: unknown): v is AdviceTiming =>
+  v === "now" || v === "before_next_mutation" || v === "milestone" || v === "deferred"
+export const validFreshness = (v: unknown): v is EvidenceFreshness =>
+  v === "current_activity" || v === "current_state" || v === "historical_context"
+
+/** A semantic identity is intentionally based on the model's stable claim and
+ * operation scope, never its presentational note. Path/unit tokens make two
+ * same-word concerns about different targets distinct. */
+export function issueKey(claim: string, scope: string, identifiers: string[]): string {
+  const normal = claim.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ")
+  const ids = identifiers.map(x => x.toLocaleLowerCase().trim()).filter(Boolean).sort().join("\u0000")
+  return createHash("sha256").update(`${normal}\u0000${scope}\u0000${ids}`).digest("hex")
 }
 
 export interface Candidate { tokens: Set<string>; paths: string[] }
@@ -538,6 +565,26 @@ export function outcomeMap(sessionDir: string): Map<string, OutcomeEvent> {
   const m = new Map<string, OutcomeEvent>()
   for (const e of readOutcomes(sessionDir)) if (e?.id) m.set(e.id, e)
   return m
+}
+
+export interface IssueEvent { id: string; state: IssueState; at: string; reason?: string; by?: string }
+export const readIssueEvents = (sessionDir: string): IssueEvent[] =>
+  readJsonl<IssueEvent>(path.join(sessionDir, "issue-events.jsonl"))
+
+/** State is append-only and survives an outbox deletion. Old `mark` records
+ * retain their original meaning through this deterministic compatibility map. */
+export function issueStateMap(sessionDir: string): Map<string, IssueEvent> {
+  const states = new Map<string, IssueEvent>()
+  for (const issue of readIssues(sessionDir)) states.set(issue.id, { id: issue.id, state: "open", at: issue.at })
+  for (const event of readIssueEvents(sessionDir)) if (event?.id && event?.state) states.set(event.id, event)
+  for (const event of readOutcomes(sessionDir)) {
+    if (!event?.id || states.has(event.id) && readIssueEvents(sessionDir).some(x => x.id === event.id)) continue
+    const state: IssueState = event.outcome === "declined" ? "declined"
+      : event.outcome === "superseded" ? "resolved"
+      : event.outcome === "accepted" || event.outcome === "investigated" ? "acknowledged" : "open"
+    states.set(event.id, { id: event.id, state, at: event.at, reason: `legacy mark: ${event.outcome}` })
+  }
+  return states
 }
 
 /** The issue a candidate repeats, or null if it is saying something new.

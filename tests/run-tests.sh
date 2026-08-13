@@ -1730,6 +1730,9 @@ rm -rf "$CXROOT"
 echo
 echo "hot path"
 
+check "the Codex operations replay proves lifecycle timing and transport facts" \
+  'bash "$HERE/replay-codex-ops-session.sh" >/dev/null'
+
 t0=$(date +%s%N); fire PreToolUse >/dev/null; t1=$(date +%s%N)
 ms=$(( (t1 - t0) / 1000000 ))
 check "drain hook completes well inside the 2s hook budget (${ms}ms)" '[ "$ms" -lt 500 ]' "${ms}ms"

@@ -28,7 +28,7 @@ const banner = (advisor: string) =>
 const flat = (s: unknown) => String(s ?? "").replace(/[\n\r\u001f]+/g, " ").trim()
 
 interface Advisory {
-  id?: string; epoch?: number | string; kind?: string
+  id?: string; issue_id?: string; epoch?: number | string; kind?: string
   note?: string; why_it_matters?: string; evidence?: string
 }
 
@@ -108,12 +108,22 @@ function publishEvent(d: string, event: string, tool: string, payload: any, epoc
   const delay = process.env.ADVISOR_TEST_TAP_DELAY
   if (delay) Bun.sleepSync(Number(delay) * 1000)
   const id = `${Math.floor(Date.now() / 1000)}-${process.pid}-${Math.floor(Math.random() * 32768)}`
+  const response = payload?.tool_response ?? {}
+  const input = payload?.tool_input ?? payload?.input ?? {}
+  const exit = response?.exit_code ?? response?.exitCode ?? payload?.exit_code
+  const elapsed = response?.elapsed_ms ?? response?.elapsedMs ?? payload?.elapsed_ms
+  const command = typeof input?.cmd === "string" ? input.cmd : typeof input?.command === "string" ? input.command : ""
   const rec = {
     at: isoNow(),
     epoch: Number(epoch),
     event, tool,
-    input: JSON.stringify(payload?.tool_input ?? {}).slice(0, 400),
-    error: String(payload?.tool_response?.error ?? payload?.error ?? "").slice(0, 400),
+    input: JSON.stringify(input).slice(0, 800),
+    error: String(response?.error ?? payload?.error ?? "").slice(0, 400),
+    ...(command ? { command } : {}),
+    ...(Number.isFinite(Number(exit)) ? { local_exit: Number(exit) } : {}),
+    ...(Number.isFinite(Number(elapsed)) ? { elapsed_ms: Number(elapsed) } : {}),
+    output_truncated: Boolean(response?.truncated ?? response?.output_truncated ?? payload?.output_truncated),
+    changed_state: Boolean(response?.changed_state ?? payload?.changed_state),
   }
   const tmp = path.join(d, "tmp", `ev-${id}.json`)
   try {

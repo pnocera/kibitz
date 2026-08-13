@@ -15,6 +15,18 @@ __ACTIVITY__
 
 __EVENTS__
 
+## Structured facts since the last advice
+
+__FACTS__
+
+Current operation phase inferred from activity: **__PHASE__**. This is context,
+not a fact you should extend beyond the observed records. In particular, an SSH
+transport failure marked "remote transport unknown" is not evidence of a remote
+command result, and incomplete output is insufficient evidence for diagnosis. A
+`--from-db` rebaseline does not establish an embedding launch or a missing
+embedding environment; do not warn about either without independent current
+evidence that this invocation will embed.
+
 ## Uncommitted changes
 
 __DIFF__
@@ -26,6 +38,12 @@ this work is acceptable or finished. The agent reads what you write and decides 
 any of it is useful.
 
 Say whatever you think is worth saying to a competent colleague in the middle of a task.
+
+Focus on the next decision boundary. During unchanged monitoring, prefer a new
+probe or silence to rephrasing an open concern. Return at most one ordinary
+advisory; a second or third is appropriate only for independent, current-activity
+risks that matter now. Keep open/deferred architecture reminders out of the way
+until their milestone.
 
 That is deliberately open, and it is wider than "what is wrong here". It includes a simpler way to
 do what they are already doing; something they appear not to have considered; an assumption worth

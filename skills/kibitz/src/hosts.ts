@@ -2,9 +2,71 @@
 // neutral; only the protocol at the host edge belongs here.
 
 import * as fs from "node:fs"
-import { ACTIVITY_LINES, SENTINEL, TRANSCRIPT_LINES, Host, exists } from "./core.ts"
+import { ACTIVITY_LINES, SENTINEL, TRANSCRIPT_LINES, Host, OperationPhase, exists } from "./core.ts"
 
 export interface Context { activity: string; goal: string }
+
+export interface Observation {
+  at?: string; tool: string; command_class: string; input: string
+  local_exit?: number; remote_transport: "not_remote" | "received" | "unknown"
+  output: "complete" | "incomplete"; elapsed_ms?: number; changed_state: boolean; error?: string
+}
+
+const redact = (s: string) => s
+  .replace(/(password|token|secret|api[_-]?key)\s*[=:]\s*([^\s,;]+)/ig, "$1=[redacted]")
+  .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/ig, "$1[redacted]@")
+
+export function commandClass(tool: string, input: string): string {
+  const c = `${tool} ${input}`.toLowerCase()
+  if (/\bssh\b|\bscp\b|\brsync\b/.test(c)) return "remote_shell"
+  if (/systemctl|journalctl|systemd/.test(c)) return "systemd"
+  if (/psql|postgres|\bsql\b/.test(c)) return "database"
+  if (/git\s+(status|diff|log|show)/.test(c)) return "inspect"
+  if (/sleep|watch|tail\s+-f/.test(c)) return "monitor"
+  if (/curl|wget|http/.test(c)) return "network"
+  return tool || "unknown"
+}
+
+export function observeEvent(e: any): Observation {
+  const rawInput = e?.input ?? e?.tool_input ?? ""
+  const input = redact(typeof rawInput === "string" ? rawInput : JSON.stringify(rawInput)).slice(0, 800)
+  const exitRaw = e?.local_exit ?? e?.tool_response?.exit_code ?? e?.tool_response?.exitCode ?? e?.exit_code
+  const local_exit = Number.isFinite(Number(exitRaw)) ? Number(exitRaw) : undefined
+  const klass = e?.command_class ?? commandClass(String(e?.tool ?? e?.tool_name ?? ""), input)
+  const remote = klass === "remote_shell"
+    ? (Number.isFinite(Number(e?.remote_exit ?? e?.remote_exit_code)) ? "received" : "unknown") : "not_remote"
+  const clipped = e?.truncated === true || e?.output_truncated === true || /\b(truncated|clipped)\b/i.test(String(e?.error ?? ""))
+  return {
+    at: typeof e?.at === "string" ? e.at : undefined,
+    tool: String(e?.tool ?? e?.tool_name ?? ""), command_class: klass, input,
+    ...(local_exit === undefined ? {} : { local_exit }), remote_transport: remote,
+    output: clipped ? "incomplete" : "complete",
+    ...(Number.isFinite(Number(e?.elapsed_ms)) ? { elapsed_ms: Number(e.elapsed_ms) } : {}),
+    changed_state: Boolean(e?.changed_state ?? /\b(edit|write|apply_patch|restart|start|stop|enable|disable|deploy|rm\b)/i.test(`${e?.tool ?? ""} ${input}`)),
+    ...(e?.error ? { error: redact(String(e.error)).slice(0, 400) } : {}),
+  }
+}
+
+export function inferPhase(observations: Observation[]): OperationPhase {
+  const last = observations[observations.length - 1]
+  if (!last) return "unknown"
+  const text = `${last.command_class} ${last.input}`.toLowerCase()
+  if (/restore|unpause|enable.*timer|start.*timer/.test(text)) return "restore"
+  if (last.changed_state) return "mutate"
+  if (/monitor|wait|is-active|journalctl|status/.test(text)) return "wait_monitor"
+  if (/verify|test|check|show/.test(text)) return "verify"
+  if (/diagnos|database|network|remote_shell/.test(text)) return "diagnose"
+  if (/inspect|read|grep|glob|diff/.test(text)) return "inspect"
+  return "unknown"
+}
+
+export const renderFacts = (observations: Observation[]): string => observations.slice(-12).map(o => {
+  const local = o.local_exit === undefined ? "local exit unknown" : `local exit ${o.local_exit}`
+  const remote = o.remote_transport === "unknown" ? "; remote transport unknown" : o.remote_transport === "received" ? "; remote result received" : ""
+  const clip = o.output === "incomplete" ? "; output incomplete" : ""
+  const fromDb = /--from-db\b/.test(o.input) ? "; from-db mode: do not infer an embedding launch from this command" : ""
+  return `${o.at ?? "now"} ${o.command_class}: ${local}${remote}${clip}${fromDb}${o.changed_state ? "; changed state" : ""}${o.error ? `; error ${o.error}` : ""}`
+}).join("\n") || "(no new structured facts)"
 
 export interface HostAdapter {
   readonly host: Host

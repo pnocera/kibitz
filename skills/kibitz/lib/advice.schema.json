@@ -16,7 +16,10 @@
           "note",
           "why_it_matters",
           "evidence",
-          "confidence"
+          "confidence",
+          "claim",
+          "timing",
+          "evidence_freshness"
         ],
         "properties": {
           "kind": {
@@ -26,6 +29,20 @@
           "note": {
             "type": "string",
             "description": "The remark itself, in one or two sentences."
+          },
+          "claim": {
+            "type": "string",
+            "description": "A stable one-sentence statement of the underlying concern. Reuse it if the same issue is reworded."
+          },
+          "timing": {
+            "type": "string",
+            "enum": ["now", "before_next_mutation", "milestone", "deferred"],
+            "description": "When this concern matters. This is not a severity or verdict."
+          },
+          "evidence_freshness": {
+            "type": "string",
+            "enum": ["current_activity", "current_state", "historical_context"],
+            "description": "How fresh the evidence is. Use historical_context when it is only background."
           },
           "why_it_matters": {
             "type": "string",

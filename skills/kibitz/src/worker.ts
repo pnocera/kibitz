@@ -7,12 +7,13 @@ import { createHash, randomUUID } from "node:crypto"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import {
-  BIN, Issue, PROMPT_TMPL,
+  BIN, ISSUE_LIFECYCLE_V1, Issue, IssueState, OperationPhase, PROMPT_TMPL,
   ageMinutes, append, appendSync, citedPaths, claimTokens, epochOf, initSess,
-  isEnabled, isMuted, isoNow, outcomeMap, pathsSignature, readIssues, repeatedIssue,
+  isEnabled, isMuted, isoNow, issueKey, issueStateMap, outcomeMap, pathsSignature, readIssues, repeatedIssue,
+  validFreshness, validTiming,
   currentHost, listJson, read, rm, validSid, writeWorkerPid,
 } from "./core.ts"
-import { adapterFor } from "./hosts.ts"
+import { adapterFor, inferPhase, observeEvent, renderFacts } from "./hosts.ts"
 import { invokeRunner, reserveCycle } from "./runners.ts"
 
 /** Digest the whole normalised note. Projecting onto [a-z0-9] collapses any
@@ -20,6 +21,17 @@ import { invokeRunner, reserveCycle } from "./runners.ts"
  *  such advisory a duplicate of the first. */
 const fingerprint = (s: string) =>
   createHash("sha1").update(s.toLowerCase().replace(/\s+/g, " ")).digest("hex")
+
+const timingRank = (timing: string, freshness: string) =>
+  (timing === "now" && freshness === "current_activity") ? 0
+    : timing === "now" ? 1 : timing === "before_next_mutation" ? 2
+      : timing === "milestone" ? 3 : 4
+
+const advisoryCap = () => {
+  const configured = Number(process.env.ADVISOR_MAX_PER_CYCLE)
+  if (Number.isFinite(configured) && configured > 0) return Math.floor(configured)
+  return currentHost() === "codex" && ISSUE_LIFECYCLE_V1 ? 1 : Number.POSITIVE_INFINITY
+}
 
 export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = ""): number {
   // `kibitzer worker <cwd> <sid>` is a public entrypoint, and sid becomes a path.
@@ -67,20 +79,26 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
   for (const f of listJson(path.join(d, "events")))
     try { fs.renameSync(f, path.join(d, "events-processing", path.basename(f))) } catch {}
 
-  const evLines: string[] = []
+  const observations: any[] = []
   for (const f of listJson(path.join(d, "events-processing"))) {
     let e: any
     try { e = JSON.parse(read(f) ?? "") } catch { rm(f); continue }
     if (String(e.epoch ?? 0) !== startEpoch) { rm(f); continue }   // previous epoch
-    evLines.push(`${e.at}  ${e.tool}  ${e.input}${e.error ? `\n    ERROR: ${e.error}` : ""}`)
+    observations.push(observeEvent(e))
   }
-  const events = evLines.slice(-60).join("\n") || "(no tool activity recorded since the last look)"
+  const events = observations.slice(-60).map(o =>
+    `${o.at ?? "now"}  ${o.tool} (${o.command_class})  ${o.input}${o.error ? `\n    ERROR: ${o.error}` : ""}`).join("\n")
+    || "(no tool activity recorded since the last look)"
+  const facts = renderFacts(observations)
+  const phase: OperationPhase = inferPhase(observations)
 
   const prompt = (read(PROMPT_TMPL) ?? "")
     .split("__CWD__").join(cwd)
     .split("__GOAL__").join(goal)
     .split("__ACTIVITY__").join(activity)
     .split("__EVENTS__").join(events)
+    .split("__FACTS__").join(facts)
+    .split("__PHASE__").join(phase)
     .split("__DIFF__").join(diff)
     .split("__HOST_AGENT__").join(currentHost() === "codex" ? "Codex" : "Claude Code")
     .split("__SOURCE_BOUNDARY__").join(adapter.advisor === "claude"
@@ -114,7 +132,11 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
   // captured before the call decides whether any of this is still wanted.
   if (!isEnabled(cwd) || epochOf(cwd) !== startEpoch) { rm(outFile); return 0 }
 
-  const advisories = run.advisories
+  // Rank before publishing. The advisor may return several thoughts, but an
+  // ordinary Codex boundary gets one interruption; separate current-activity
+  // `now` hazards may occupy the remaining two slots.
+  const advisories = [...run.advisories].sort((a, b) => timingRank(String(a?.timing ?? "deferred"), String(a?.evidence_freshness ?? "historical_context"))
+    - timingRank(String(b?.timing ?? "deferred"), String(b?.evidence_freshness ?? "historical_context")))
   const seenPath = path.join(d, "seen")
   const seen = new Set((read(seenPath) ?? "").split("\n").filter(Boolean))
   // Identity is decided here, on the one path both directions publish through:
@@ -122,9 +144,13 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
   // upstream of this loop.
   const issues = readIssues(d)
   const outcomes = outcomeMap(d)
+  const states = issueStateMap(d)
   const outcomeOf = (id: string) => outcomes.get(id)?.outcome
+  const latestByKey = new Map<string, Issue>()
+  for (const issue of issues) if (issue.key) latestByKey.set(issue.key, issue)
   let n = 0
   let repeats = 0
+  const cap = advisoryCap()
 
   for (const a of advisories) {
     const note = a?.note ?? ""
@@ -132,32 +158,52 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
     const kind = a?.kind ?? ""
     const evidence = a?.evidence ?? ""
     if (isMuted(cwd, `${kind} ${note} ${evidence}`)) continue
-    // The same sentence again -- identical once case and spacing are normalised --
-    // is suppressed outright, and deliberately does not get the freshness reprieve
-    // the register gives a paraphrase. This is the only check that works on a
-    // note the tokeniser cannot segment -- a note written
-    // entirely in Japanese or Cyrillic yields no tokens at all -- and letting an
-    // unchanged sentence through on an unrelated edit would reopen the
-    // repetition this exists to stop.
     const fp = fingerprint(note)
-    if (seen.has(fp)) continue                     // said it already
-
     const paths = citedPaths(evidence, cwd)
     const tokens = claimTokens(`${note} ${a?.why_it_matters ?? ""}`)
-    const already = repeatedIssue({ tokens, paths }, issues, cwd, outcomeOf)
-    if (already) {
-      // Not published, but not invisible either: an operator who wonders why the
-      // advisor went quiet about something can see that it did not.
-      append(logPath, `repeat of ${already.id.slice(0, 6)}; not publishing it again\n`)
-      append(path.join(d, "repeats"), `${already.id}\n`)
+    const hasStableClaim = typeof a?.claim === "string" && a.claim.trim() !== ""
+    const lifecycle = ISSUE_LIFECYCLE_V1 && hasStableClaim
+    const claim = hasStableClaim ? a.claim.trim() : note
+    const timing = validTiming(a?.timing) ? a.timing : "deferred"
+    const freshness = validFreshness(a?.evidence_freshness) ? a.evidence_freshness : "historical_context"
+    const sig = pathsSignature(cwd, paths)
+    const key = issueKey(claim, cwd, paths)
+    const existing = lifecycle ? latestByKey.get(key) : undefined
+    const existingState: IssueState = existing ? (states.get(existing.id)?.state ?? "open") : "open"
+    const milestoneReached = timing === "milestone" && phase === "restore" && existing?.phase !== "restore"
+    const evidenceChanged = Boolean(existing && existing.sig !== sig)
+    const staleLifecycle = Boolean(existing && !evidenceChanged && !milestoneReached)
+    const already = !lifecycle ? repeatedIssue({ tokens, paths }, issues, cwd, outcomeOf) : undefined
+
+    // Exact prose remains a backstop for the legacy policy. Lifecycle mode
+    // deliberately permits the same claim at a new evidence/milestone boundary.
+    if (!lifecycle && seen.has(fp)) continue
+    if (existing && existingState === "declined") {
+      append(path.join(d, "suppressions.jsonl"), JSON.stringify({ id: existing.id, at: isoNow(), reason: "declined" }) + "\n")
+      repeats++; continue
+    }
+    if (staleLifecycle || already) {
+      const id = existing?.id ?? already!.id
+      const reason = staleLifecycle ? "unchanged_open" : "legacy_repeat"
+      append(logPath, `repeat of ${id.slice(0, 6)} (${reason}); not publishing it again\n`)
+      append(path.join(d, "repeats"), `${id}\n`)
+      append(path.join(d, "suppressions.jsonl"), JSON.stringify({ id, at: isoNow(), reason }) + "\n")
       repeats++
       continue
     }
+    // At most one ordinary result per Codex boundary. A new current-activity
+    // `now` risk may still interrupt alongside it, up to the existing drain cap.
+    const urgentNow = timing === "now" && freshness === "current_activity"
+    if (n >= cap && !(urgentNow && n < 3)) {
+      append(path.join(d, "suppressions.jsonl"), JSON.stringify({ at: isoNow(), reason: "delivery_cap", claim }) + "\n")
+      continue
+    }
 
-    const id = randomUUID()
+    const id = existing?.id ?? randomUUID()
+    const deliveryId = randomUUID()
     const short = id.slice(0, 6)
     const rec = {
-      id, epoch: Number(startEpoch), kind, note,
+      id: deliveryId, issue_id: id, epoch: Number(startEpoch), kind, note, claim, timing, evidence_freshness: freshness, phase,
       why_it_matters: a?.why_it_matters ?? "",
       evidence: a?.evidence ?? "",
       confidence: typeof a?.confidence === "number" ? a.confidence : 0,
@@ -184,7 +230,7 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
     // form anywhere for an operator to fall back on.
     const issue: Issue = {
       id, at: isoNow(), kind, fp,
-      tokens: [...tokens], paths, sig: pathsSignature(cwd, paths),
+      tokens: [...tokens], paths, sig, key, claim, scope: cwd, timing, evidence_freshness: freshness, phase,
     }
     // Before the outbox and before `seen`, for the same reason the log comes
     // before both: this file is what makes a paraphrase a repeat on the next
@@ -196,7 +242,11 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
       append(logPath, `could not register ${short}; not publishing it\n`)
       continue
     }
-    issues.push(issue)
+    issues.push(issue); latestByKey.set(key, issue)
+    if (existing && (evidenceChanged || milestoneReached)) {
+      appendSync(path.join(d, "issue-events.jsonl"), JSON.stringify({ id, state: "open", at: isoNow(),
+        reason: evidenceChanged ? "fresh evidence" : "restore milestone" }) + "\n")
+    }
     // Suppress a repeat only once the advisory is actually recorded. Marking it
     // seen first turns a transient failure into permanent omission: the advisory
     // is never published, never registered, and deduplicated away for the rest
@@ -205,10 +255,10 @@ export function cmdWorker(cwd: string, sid: string, transcript = "", admitted = 
     append(seenPath, fp + "\n")
     append(path.join(d, "kinds"), (kind || "unlabelled") + "\n")
 
-    const tmp = path.join(d, "tmp", `${id}.json`)
+    const tmp = path.join(d, "tmp", `${deliveryId}.json`)
     try {
       fs.writeFileSync(tmp, JSON.stringify(rec))
-      fs.renameSync(tmp, path.join(d, "outbox", `${Math.floor(Date.now() / 1000)}-${id}.json`))
+      fs.renameSync(tmp, path.join(d, "outbox", `${Math.floor(Date.now() / 1000)}-${deliveryId}.json`))
     } catch { rm(tmp); continue }
     n++
   }
